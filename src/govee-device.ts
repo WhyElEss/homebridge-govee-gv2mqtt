@@ -210,12 +210,22 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setBrightness(brightness: number): void {
+    const rounded = Math.round(brightness);
+    const changed = rounded !== this.state.brightness;
     this.markLocalChange();
-    this.state.brightness = Math.round(brightness);
+    this.state.brightness = rounded;
     if (!this.state.isOn) {
       return;
     }
     if (this.state.mode === 'effect') {
+      if (!changed) {
+        // HomeKit resends the last-known brightness right after turning a
+        // light on (e.g. as part of the same automation transaction that
+        // also just selected an effect via the Effects accessory). Treat a
+        // no-op resend as just that, not as a user dragging the brightness
+        // slider to explicitly back out of the effect.
+        return;
+      }
       this.state.mode = 'adaptive';
       this.state.effectIndex = 1;
       this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
