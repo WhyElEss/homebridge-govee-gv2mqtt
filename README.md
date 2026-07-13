@@ -3,76 +3,77 @@
 A Homebridge dynamic platform plugin for Govee lights exposed through a
 [govee2mqtt](https://github.com/wez/govee2mqtt) (`gv2mqtt`) bridge.
 
-It replaces a `mqttthing`-based config that hand-rolled two accessories per
-light (a Lightbulb and a Television used only to pick scene effects) sharing
-state via a global JS object. This plugin supports **any number of physical
-devices**, either listed explicitly in `devices` or auto-discovered (see
-below), and keeps the same Lightbulb + "Effects" Television pairing per
-device, but with proper push updates over MQTT instead of only responding to
-HomeKit polling.
+For each configured (or auto-discovered) physical device it creates a pair of
+accessories: a Lightbulb for on/off/brightness/color, and a Television-style
+accessory whose "Inputs" are that device's real scene/music/DIY effects. The
+Television-as-effect-picker is a deliberate hack — HomeKit's Lightbulb
+service has no concept of a named effect, but Television/InputSource does.
 
 ## Device compatibility
 
-This plugin targets the **Govee Table Lamp** family and is tested against a
-**Govee Table Lamp 2**. Brightness, color temperature and RGB handling is
-generic Govee light control and should work across the family (Table Lamp
-**1** and **Table Lamp Pro** included) and likely most other Govee lights
-gv2mqtt supports.
+Tested against two real devices: a **Govee Table Lamp 2 (H6022)** and a
+**Govee Aura Table Lamp (H6052)**. Both are generic Govee light control
+(brightness/color-temp/RGB), so the same code path should work for other
+Govee lights `gv2mqtt` supports — the per-device effect list, color
+temperature range, and DIY scenes are all discovered live from Govee's API
+per the device's actual SKU (see below), not hard-coded to one model.
 
-The effect list itself is **discovered per device at runtime** (see below),
-not hard-coded to one model — so Table Lamp 1/Pro (or any other Govee light)
-get *their own* real effect list automatically, not the Table Lamp 2's. The
-97-name static list in [src/effects.ts](src/effects.ts) only exists as a
-fallback for the first ~15s after a restart, or if discovery is unavailable
-for some reason (see "Real effect list per device" below) — that fallback
-list *is* specific to a Table Lamp 2 and may show the wrong names for other
-models during that gap.
+A static 97-name fallback list in [src/effects.ts](src/effects.ts) — modeled
+on the Table Lamp 2's effects — is used only for the first ~15s after a
+restart, before that device's real list has been discovered, or if discovery
+never arrives for some reason. It's a stopgap, not a source of truth.
 
 ## What each accessory does
 
-For every entry in `devices` the platform creates:
+For every known device the platform creates:
 
 - **`<name>`** — a Lightbulb accessory: On/Off, Brightness, Hue/Saturation,
   Color Temperature, and (optionally) Adaptive Lighting.
 - **`<name> Effects`** — a Television accessory whose "Inputs" are that
   specific device's real scene effects (Aurora, Fireplace, Rainbow, ...),
-  **music (audio-reactive) modes** (Rhythm, Energic, Hopping, Light Waves,
-  Meteor Shower, Spectrum, ...), and any DIY scenes you've created for it -
-  discovered live from gv2mqtt (see below). Selecting an input switches the
-  light into that effect or music mode; input 1 ("Normal Light") returns it
-  to normal color/color-temperature mode. Because this is a regular HomeKit
-  input selection, music modes can now be triggered manually from the Home
-  app or wired into HomeKit automations (e.g. "when media starts playing on
-  the living room TV, set Govee Table Lamp Effects input to Rhythm") —
-  something the stock Govee HomeKit integration doesn't expose at all. This
-  accessory can be disabled per-device with `enableEffects: false`.
+  **music (audio-reactive) modes** (reported by Govee's API with a `Music: `
+  prefix, e.g. `Music: Rhythm`, `Music: Spectrum`), and any DIY scenes
+  created for it. Selecting an input switches the light into that effect;
+  input 1 ("Normal Light") returns it to normal color/color-temperature
+  mode. Because this is a regular HomeKit input selection, music modes can
+  be triggered manually from the Home app or wired into HomeKit automations
+  — something the stock Govee HomeKit integration doesn't expose at all.
+  This accessory can be disabled per-device with `enableEffects: false`.
 
 Both accessories for a device share one `GoveeDevice` instance
-([src/govee-device.ts](src/govee-device.ts)) that owns the MQTT
-subscription/publish logic — the direct replacement for the old
-`global.govee` object.
+([src/govee-device.ts](src/govee-device.ts)) that owns all MQTT
+subscription/publish logic and cached state for that physical light.
 
 ## Install
 
-Build the plugin, then make it available inside your Homebridge Docker
-container (which already has Node.js):
+This plugin isn't (necessarily) on the public npm registry — the repo is set
+up to support publishing there (see `package.json`), but the verified,
+working install path is as a **git dependency**, which is also how the
+official `homebridge/homebridge` Docker image's built-in plugin manager
+works: it reads a `package.json` at the root of the config volume and runs
+`npm install` against it on every container start.
 
-```bash
-npm install
-npm run build
-```
+1. On the host, edit `<config-volume>/package.json` and add to `dependencies`:
+   ```json
+   "homebridge-govee-gv2mqtt": "github:WhyElEss/homebridge-govee-gv2mqtt"
+   ```
+2. Restart the Homebridge container. Its startup script clones the repo,
+   and npm's `prepare` script (`npm run build`) compiles the TypeScript
+   automatically — no manual build step needed.
+3. To pick up a newer commit later, since there's no lockfile pinning a
+   specific version: remove the already-installed copy
+   (`node_modules/homebridge-govee-gv2mqtt` inside the container) and
+   restart, so `npm install` re-clones instead of assuming what's already
+   there is current.
 
-- **If Homebridge runs via `oznu/homebridge` or the official image** with a
-  mounted config volume, drop this project under that volume's plugin path,
-  or `npm pack` it and `npm install /path/to/homebridge-govee-gv2mqtt-0.1.0.tgz`
-  inside the container.
-- **Via Homebridge Config UI X**, use "Install Plugin" → "From npm tarball/git
-  URL" once this is pushed to a git repo or private npm registry.
+If you're not using that Docker image, install like any other Homebridge
+plugin from source: `git clone`, `npm install`, `npm run build`, then make
+the resulting package visible to Homebridge's `node_modules` (or `npm link`).
 
 ## Configuration
 
-Add a `GoveeGv2Mqtt` platform block to Homebridge's `config.json` (or configure
-it through Config UI X, which reads `config.schema.json`):
+Add a `GoveeGv2Mqtt` platform block to Homebridge's `config.json` (or
+configure it through Config UI X, which reads `config.schema.json`):
 
 ```json
 {
@@ -97,14 +98,13 @@ it through Config UI X, which reads `config.schema.json`):
 }
 ```
 
-Each device only needs `name` and `deviceId` — every other field has the same
-default as the original config (`minMireds: 111`, `maxMireds: 500`,
+Each device only needs `name` and `deviceId` — every other field defaults
+sensibly (`enabled: true`, `minMireds: 111`, `maxMireds: 500`,
 `adaptiveLighting: true`, `enableEffects: true`,
-`colorSaturationThreshold: 0.75`).
+`colorSaturationThreshold: 0.75`, `turnOffOnStartup: false`).
 
 `deviceId` is whatever identifier your `gv2mqtt` bridge uses in
-`<topicPrefix>/<deviceId>/state` and `.../command` — the same value that was
-previously hard-coded into every topic string in the old `mqttthing` config.
+`<topicPrefix>/<deviceId>/state` and `.../command`.
 
 ### Auto-discovering devices instead of listing them by hand
 
@@ -123,92 +123,104 @@ Every Govee device gv2mqtt reports gets exposed automatically (name pulled
 from its Home Assistant discovery config, same source as the effect list),
 so you don't need to know/type any `deviceId` up front. Each newly-found
 device is **also written into this platform's `devices[]` array in
-config.json**, exactly as if you'd added it by hand - open Config UI X's
-settings form afterwards and it's right there with its name and device ID,
-same as anything you typed in yourself.
+config.json**, exactly as if you'd added it by hand — open Config UI X's
+settings form afterwards and it's right there with its name and device ID.
 
 Two ways an already-known device stops getting (re-)exposed:
 
-- **Untick its `enabled` checkbox** on its `devices[]` entry (in Config UI X
-  or directly in config.json). It stays in the list - so auto-discovery
-  won't re-add it as "new" - but no accessories get created for it.
+- **Untick its `enabled` checkbox** on its `devices[]` entry. It stays in
+  the list — so auto-discovery won't re-add it as "new" — but no
+  accessories get created for it.
 - **Explicit `devices[]` entries take precedence over auto-discovery** for
-  that `deviceId` in general - if you'd already listed a device by hand
-  before turning `autoDiscover` on, its settings (name, `minMireds`,
-  `enableEffects`, etc.) are used as-is and it's never treated as "newly
-  found."
+  that `deviceId` — if it's already listed by hand, its settings (name,
+  `minMireds`, `enableEffects`, etc.) are used as-is and it's never treated
+  as "newly found."
 
-Without `autoDiscover`, `devices[]` is the only source of truth (an allowlist
-— nothing shows up in HomeKit unless it's listed), which is the safer default
-for a shared/production Home setup where a device silently appearing on its
-own isn't desirable. New devices are picked up as gv2mqtt announces them,
-which (like the effect list and state refresh) depends on
-`refreshStateOnConnect`/`periodicRefreshIntervalMs` below — a device added to
-your Govee account won't show up in HomeKit until the next birth-topic ping
-after gv2mqtt itself has learned about it.
+Without `autoDiscover`, `devices[]` is the only source of truth (an
+allowlist — nothing shows up in HomeKit unless it's listed), the safer
+default for a shared/production Home setup. New devices are picked up as
+gv2mqtt announces them, which (like the effect list and state refresh below)
+depends on `refreshStateOnConnect`/`periodicRefreshIntervalMs`.
 
 Writing to `devices[]` in config.json from a running platform isn't an
-officially supported thing for a regular (non-Custom-UI) Homebridge plugin to
-do - it re-reads and re-writes the whole file defensively, but formatting/
-comments in the original file aren't preserved, and there's a small window
-where an edit made through Config UI X at the exact same moment could get
-lost. If the write fails for any reason (permissions, etc.) the device still
-works for that session - it'll just need rediscovering on the next restart.
+officially supported thing for a regular (non-Custom-UI) Homebridge plugin
+to do — it re-reads and re-writes the whole file defensively on each new
+discovery, but formatting/comments in the original file aren't preserved,
+and there's a small window where an edit made through Config UI X at the
+exact same moment could get lost. If the write fails for any reason
+(permissions, etc.) the device still works for that session — it'll just
+need rediscovering on the next restart.
 
-## Behavior notes / intentional differences from the original config
+## Behavior notes
 
-- **Effect detection from the device side is no longer "sticky."** The
-  original `getActiveInput` only updated its cached effect index when the
-  accessory was *already* in effect mode locally, so an effect switched from
-  the Govee app (not through HomeKit) could go unnoticed. This plugin always
-  trusts the device's reported `effect`/`color_mode` fields (outside the
-  optimistic-cache window described below), so external changes now show up
-  correctly in HomeKit.
 - **Optimistic cache window** (`optimisticCacheMs`, default 10000ms): a
-  locally-set value (brightness, color, etc.) is trusted for this long before
-  falling back to whatever the device last reported, so the Home app doesn't
-  flicker back to a stale value while the round trip to the physical device
-  completes.
-- **White vs. color heuristic** (`colorSaturationThreshold`, default `0.75`):
-  when Home's color wheel is used, the resulting color's saturation decides
-  whether it's sent to the device as a color-temperature command (low
-  saturation → treated as "white") or a true RGB color command, exactly like
-  the original `setRGB` logic.
+  locally-set value (brightness, color, on/off) is trusted for this long
+  before an incoming device report is allowed to overwrite it, so the Home
+  app doesn't flicker back to a stale value while the round trip to the
+  physical device completes. A device-reported "off" specifically only
+  resets the cached effect/mode once this window has passed, so a spurious
+  transient "off" report right after turning a light on with an effect
+  selected doesn't wipe that selection (see the effect race note below for
+  why that can happen).
+- **White vs. color heuristic** (`colorSaturationThreshold`, default
+  `0.75`): when Home's color wheel is used, the resulting color's
+  saturation decides whether it's sent to the device as a
+  color-temperature command (low saturation → treated as "white") or a
+  true RGB color command.
 - **Adaptive Lighting** requires the Home Hub to be on iOS 13+/aligned
-  hardware, same as any other lightbulb accessory; it's controlled per-device
-  via `adaptiveLighting` in config.
+  hardware; it's controlled per-device via `adaptiveLighting` in config,
+  and is automatically suppressed while an effect is active (a
+  color-temperature update received while in effect mode is ignored rather
+  than cancelling the effect).
 - **Real effect list per device** (needs `refreshStateOnConnect`, default
-  `true`): gv2mqtt itself fetches each device's actual supported scenes from
+  `true`): gv2mqtt fetches each device's actual supported scenes from
   Govee's official Platform API (per the exact SKU of that model) plus that
-  Govee account's DIY scenes for the device, and republishes the combined
-  list as the `effect_list` field of its Home Assistant MQTT discovery config
-  for the light entity. This plugin subscribes to that discovery config topic
-  (`<haDiscoveryPrefix>/light/gv2mqtt-<deviceId>/config`) and uses its
-  `effect_list` to build the Effects accessory's inputs, instead of a
-  hard-coded list. **Music modes are part of that same API response** (gv2mqtt
-  internally tags them with a `Music: ` prefix before handing them to the
-  device) - no manual discovery/sniffing step is needed for them. The only
-  thing that still requires a manual step is creating a DIY scene in the
-  first place (that's inherent to what a DIY scene is); once created, gv2mqtt
-  picks it up on its own next scene-list fetch, same as any stock scene.
-  Since gv2mqtt doesn't retain either its state or discovery-config topics, a
-  fresh subscribe alone reveals neither - both only arrive after gv2mqtt's own
-  startup, or after this plugin pings the Home Assistant "birth" topic (see
-  below), which is also why the fallback list exists for the gap in between.
-  Set `periodicRefreshIntervalMs` to periodically re-trigger this (e.g. to
-  pick up a newly-created DIY scene, or - with `autoDiscover` - a newly-added
+  Govee account's DIY scenes, and republishes the combined list as the
+  `effect_list` field of its Home Assistant MQTT discovery config for the
+  light entity (topic `<haDiscoveryPrefix>/light/gv2mqtt-<deviceId>/config`).
+  This plugin subscribes to that topic and uses `effect_list` to build the
+  Effects accessory's inputs instead of the hard-coded fallback. Music
+  modes are part of that same response, tagged with a `Music: ` prefix — no
+  separate discovery step needed. The only manual step left is creating a
+  DIY scene in the first place; once created, gv2mqtt picks it up on its
+  own next fetch like any stock scene. Neither this topic nor the state
+  topic is retained by gv2mqtt, so a fresh subscribe alone reveals nothing —
+  both only arrive after gv2mqtt's own startup or after this plugin pings
+  the Home Assistant "birth" topic (next bullet). Set
+  `periodicRefreshIntervalMs` to periodically re-trigger this (e.g. to pick
+  up a newly-created DIY scene, or — with `autoDiscover` — a newly-added
   device) without restarting Homebridge.
+- **Stable effect Identifiers**: HomeKit correlates a Television's "Inputs"
+  by a numeric `Identifier`, not by name, and Govee's API doesn't guarantee
+  `effect_list` comes back in the same order on every refresh. This plugin
+  assigns each effect name a permanent number the first time it's seen and
+  never reassigns it by array position on later refreshes — otherwise the
+  same number could end up pointing at a different effect between syncs,
+  which can desync Home's own Input cache and make entries silently vanish
+  from its UI even though the underlying HAP services are all present and
+  correct.
 - **Real state after a restart** (`refreshStateOnConnect`, default `true`):
-  gv2mqtt publishes its state topics without the MQTT `retain` flag, so simply
-  subscribing after a Homebridge/container/broker restart reveals nothing —
-  Home would keep showing stale defaults until the light's next unrelated
-  state change. gv2mqtt does republish every device's current state ~15s after
-  seeing *any* message on the Home Assistant "birth" topic (it thinks HA just
-  restarted), so on every MQTT connect this plugin publishes `"online"` to
-  `<haDiscoveryPrefix>/status` (default `homeassistant/status`; override with
-  `haStatusTopic` if gv2mqtt's Home Assistant integration listens elsewhere)
-  to piggyback on that mechanism - the same ping that also drives the real
-  effect list discovery above. This only affects what gets displayed — it has
-  nothing to do with `turnOffOnStartup`, which still defaults to `false` (the
-  original config always forced the light off 10s after Homebridge started;
-  this plugin only does that if you explicitly opt in per-device).
+  gv2mqtt publishes its state topics without the MQTT `retain` flag, so
+  simply subscribing after a restart reveals nothing — Home would keep
+  showing stale defaults until the light's next unrelated state change.
+  gv2mqtt republishes every device's current state (and discovery config,
+  including the effect list) ~15s after seeing *any* message on the Home
+  Assistant "birth" topic, so on every MQTT connect this plugin publishes
+  `"online"` to `<haDiscoveryPrefix>/status` (default
+  `homeassistant/status`; override with `haStatusTopic` if needed) to
+  piggyback on that mechanism. This has nothing to do with
+  `turnOffOnStartup` (default `false`), which forces the light off shortly
+  after Homebridge starts if explicitly enabled per-device.
+- **Effect selection vs. a server-side race**: Govee's cloud API has been
+  observed to occasionally apply an effect/scene command out of order
+  against an unrelated color-temperature command issued a few seconds
+  earlier (e.g. Adaptive Lighting's periodic nudge) — settling back on
+  plain color mode several seconds later even though the effect command
+  was sent last. To guard against this, selecting an effect schedules a
+  single re-send of that same command ~5s later, cancelled/replaced if a
+  different effect gets selected before then — so paging quickly through
+  effects by hand in Home doesn't pile up a burst of redundant commands.
+- **Debug logging**: every MQTT publish/receive and every characteristic
+  setter call (with the state it saw and what it decided to do) is logged
+  at debug level. Enable Homebridge's debug mode to see it when
+  troubleshooting unexpected behavior.
