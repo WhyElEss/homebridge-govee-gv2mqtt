@@ -324,6 +324,13 @@ export class GoveeDevice extends EventEmitter {
     const name = this.state.effectNames[index - 1];
     this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
     this.markLocalChange();
+    // HomeKit doesn't guarantee whether Active or ActiveIdentifier arrives
+    // first when an automation turns the light on with an effect selected.
+    // Marking isOn true here (regardless of branch) means that whichever of
+    // setOn/setEffectIndex fires second sees the light as already on: if
+    // it's setOn(true), its "already on" no-op guard kicks in instead of
+    // resetting back to Normal Light.
+    this.state.isOn = true;
     if (index <= 1 || !name) {
       this.state.effectIndex = 1;
       this.state.mode = 'adaptive';
