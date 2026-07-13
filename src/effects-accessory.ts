@@ -2,6 +2,7 @@ import { PlatformAccessory, Service } from 'homebridge';
 import { GoveeGv2MqttPlatform } from './platform';
 import { GoveeDevice } from './govee-device';
 import { EFFECT_NAMES } from './effects';
+import { encodeDisplayOrder } from './tlv';
 
 /**
  * Exposes Govee's built-in scene effects as a Television accessory's "Inputs",
@@ -56,6 +57,13 @@ export class EffectsAccessory {
 
       this.service.addLinkedService(input);
     });
+
+    // Home (and other HomeKit controllers) don't reliably fall back to service
+    // creation order for the Inputs list; without an explicit DisplayOrder they
+    // can show inputs in an arbitrary order even though Identifier->name mapping
+    // stays correct.
+    const order = EFFECT_NAMES.map((_, i) => i + 1);
+    this.service.setCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
 
     device.on('change', (state) => {
       this.service.updateCharacteristic(Characteristic.Active, state.isOn ? 1 : 0);
