@@ -3,8 +3,12 @@ import { GoveeGv2MqttPlatform } from './platform';
 import { GoveeDevice } from './govee-device';
 import { encodeDisplayOrder } from './tlv';
 
-/** HomeKit Television accessories support at most 100 Input Sources. */
-const MAX_INPUTS = 100;
+/**
+ * HAP-NodeJS hard-caps an accessory at 100 services total. This accessory
+ * always carries AccessoryInformation + Television, leaving this many slots
+ * for InputSource children.
+ */
+const MAX_INPUTS = 98;
 
 function slugify(name: string): string {
   return (
@@ -82,12 +86,25 @@ export class EffectsAccessory {
       names = names.slice(0, MAX_INPUTS);
     }
 
-    const seenSubtypes = new Set<string>();
+    const desiredSubtypes = new Set(names.map((name) => `effect-${slugify(name)}`));
+
+    // Remove stale InputSource services *before* adding new ones. Matters
+    // both when the list shrinks and, critically, when migrating from an
+    // older version of this plugin that used positional subtypes
+    // ("effect-1") instead of name-based ones ("effect-normal-light"): the
+    // old and new services don't match by getServiceById, so adding all the
+    // new ones before clearing the old ones would transiently exceed HAP's
+    // 100-services-per-accessory cap.
+    for (const svc of [...this.accessory.services]) {
+      if (svc.UUID === Svc.InputSource.UUID && (!svc.subtype || !desiredSubtypes.has(svc.subtype))) {
+        this.service.removeLinkedService(svc);
+        this.accessory.removeService(svc);
+      }
+    }
 
     names.forEach((name, i) => {
       const identifier = i + 1;
       const subtype = `effect-${slugify(name)}`;
-      seenSubtypes.add(subtype);
       const input =
         this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, name, subtype);
 
@@ -100,16 +117,6 @@ export class EffectsAccessory {
 
       this.service.addLinkedService(input);
     });
-
-    // Drop InputSource services for effects no longer in the list (e.g. a DIY
-    // scene was deleted in the Govee app, or the fallback list is being
-    // replaced by the real discovered one).
-    for (const svc of [...this.accessory.services]) {
-      if (svc.UUID === Svc.InputSource.UUID && svc.subtype && !seenSubtypes.has(svc.subtype)) {
-        this.service.removeLinkedService(svc);
-        this.accessory.removeService(svc);
-      }
-    }
 
     // Home (and other HomeKit controllers) don't reliably fall back to service
     // creation order for the Inputs list; without an explicit DisplayOrder they
