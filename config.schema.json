@@ -81,7 +81,8 @@
         "title": "Excluded Device IDs",
         "type": "array",
         "items": {
-          "type": "string"
+          "type": "string",
+          "title": "Device ID"
         },
         "description": "Device IDs to never expose to HomeKit, whether they'd otherwise come from Auto-Discover Devices or from the list below - e.g. a lamp you'd rather control with a different plugin/app."
       },
@@ -158,7 +159,13 @@
     "haStatusTopic",
     "periodicRefreshIntervalMs",
     "autoDiscover",
-    "excludedDeviceIds",
+    {
+      "key": "excludedDeviceIds",
+      "type": "array",
+      "items": [
+        "excludedDeviceIds[]"
+      ]
+    },
     {
       "key": "devices",
       "type": "array",
