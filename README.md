@@ -10,6 +10,23 @@ devices**, each configured as one entry in `devices`, and keeps the same
 Lightbulb + "Effects" Television pairing per device, but with proper push
 updates over MQTT instead of only responding to HomeKit polling.
 
+## Device compatibility
+
+This plugin targets the **Govee Table Lamp** family and is tested against a
+**Govee Table Lamp 2**. The list of 97 scene/DIY/music effect names in
+[src/effects.ts](src/effects.ts) is hard-coded to what that specific model
+reports — it is *not* queried from the device at runtime.
+
+Table Lamp **1** and **Table Lamp Pro** should mostly work (same brightness,
+color temperature and RGB handling), but their firmware ships its own,
+different effect name list, so the "Effects" accessory's input names may not
+line up with what the device actually supports — selecting an input by
+position (e.g. "input 12") could apply the wrong effect for that model, or one
+it doesn't have at all. If you're on one of those models and hit mismatched
+effect names, open an issue with your device's actual effect list (visible in
+the Govee app, or in the MQTT `effect` field when you switch effects from the
+app) and it can be added as a per-model override.
+
 ## What each accessory does
 
 For every entry in `devices` the platform creates:
@@ -17,10 +34,16 @@ For every entry in `devices` the platform creates:
 - **`<name>`** — a Lightbulb accessory: On/Off, Brightness, Hue/Saturation,
   Color Temperature, and (optionally) Adaptive Lighting.
 - **`<name> Effects`** — a Television accessory whose "Inputs" are Govee's
-  built-in scene effects (Aurora, Fireplace, Rainbow, ...). Selecting an input
-  switches the light into that effect; input 1 ("Normal Light") returns it to
-  normal color/color-temperature mode. This can be disabled per-device with
-  `enableEffects: false`.
+  built-in scene effects (Aurora, Fireplace, Rainbow, ...) **and its music
+  (audio-reactive) modes** (Rhythm, Energic, Hopping, Light Waves, Meteor
+  Shower, Spectrum, ...). Selecting an input switches the light into that
+  effect or music mode; input 1 ("Normal Light") returns it to normal
+  color/color-temperature mode. Because this is a regular HomeKit input
+  selection, music modes can now be triggered manually from the Home app or
+  wired into HomeKit automations (e.g. "when media starts playing on the
+  living room TV, set Govee Table Lamp Effects input to Rhythm") — something
+  the stock Govee HomeKit integration doesn't expose at all. This accessory
+  can be disabled per-device with `enableEffects: false`.
 
 Both accessories for a device share one `GoveeDevice` instance
 ([src/govee-device.ts](src/govee-device.ts)) that owns the MQTT
