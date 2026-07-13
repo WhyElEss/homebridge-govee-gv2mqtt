@@ -1,0 +1,133 @@
+{
+  "pluginAlias": "GoveeGv2Mqtt",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Controls Govee lights through a [govee2mqtt](https://github.com/wez/govee2mqtt) bridge. Each device below becomes a Lightbulb accessory, plus an optional Television-style accessory used to pick built-in Govee scene effects.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform Name",
+        "type": "string",
+        "default": "Govee (gv2mqtt)",
+        "required": true
+      },
+      "mqttUrl": {
+        "title": "MQTT Broker URL",
+        "type": "string",
+        "default": "mqtt://mosquitto:1883",
+        "required": true,
+        "description": "e.g. mqtt://mosquitto:1883"
+      },
+      "mqttUsername": {
+        "title": "MQTT Username",
+        "type": "string"
+      },
+      "mqttPassword": {
+        "title": "MQTT Password",
+        "type": "string"
+      },
+      "topicPrefix": {
+        "title": "Topic Prefix",
+        "type": "string",
+        "default": "gv2mqtt/light",
+        "description": "Matches the govee2mqtt bridge topic layout: <prefix>/<deviceId>/state and <prefix>/<deviceId>/command"
+      },
+      "debounceRecvMs": {
+        "title": "Incoming Message Debounce (ms)",
+        "type": "integer",
+        "default": 100,
+        "minimum": 0
+      },
+      "optimisticCacheMs": {
+        "title": "Optimistic Cache Window (ms)",
+        "type": "integer",
+        "default": 10000,
+        "minimum": 0,
+        "description": "How long a locally-set value is trusted before falling back to the device-reported value, to avoid HomeKit UI flicker while the round trip to the device completes."
+      },
+      "devices": {
+        "title": "Devices",
+        "type": "array",
+        "required": true,
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "required": true,
+              "default": "Govee Light"
+            },
+            "deviceId": {
+              "title": "Device ID",
+              "type": "string",
+              "required": true,
+              "description": "The device identifier used in the MQTT topic, e.g. 18DFD0C806467677"
+            },
+            "minMireds": {
+              "title": "Min Color Temperature (mireds)",
+              "type": "integer",
+              "default": 111
+            },
+            "maxMireds": {
+              "title": "Max Color Temperature (mireds)",
+              "type": "integer",
+              "default": 500
+            },
+            "adaptiveLighting": {
+              "title": "Enable Adaptive Lighting",
+              "type": "boolean",
+              "default": true
+            },
+            "enableEffects": {
+              "title": "Expose Scene Effects (as a TV-style accessory)",
+              "type": "boolean",
+              "default": true
+            },
+            "colorSaturationThreshold": {
+              "title": "Color/White Split Threshold (0-1)",
+              "type": "number",
+              "default": 0.75,
+              "description": "Below this saturation, a color picked in Home is sent to the device as a color-temperature command instead of RGB."
+            },
+            "turnOffOnStartup": {
+              "title": "Turn Off On Homebridge Startup",
+              "type": "boolean",
+              "default": false
+            },
+            "turnOffOnStartupDelayMs": {
+              "title": "Startup Off Delay (ms)",
+              "type": "integer",
+              "default": 10000
+            }
+          }
+        }
+      }
+    }
+  },
+  "form": [
+    "name",
+    "mqttUrl",
+    "mqttUsername",
+    "mqttPassword",
+    "topicPrefix",
+    "debounceRecvMs",
+    "optimisticCacheMs",
+    {
+      "key": "devices",
+      "type": "array",
+      "items": [
+        "devices[].name",
+        "devices[].deviceId",
+        "devices[].minMireds",
+        "devices[].maxMireds",
+        "devices[].adaptiveLighting",
+        "devices[].enableEffects",
+        "devices[].colorSaturationThreshold",
+        "devices[].turnOffOnStartup",
+        "devices[].turnOffOnStartupDelayMs"
+      ]
+    }
+  ]
+}

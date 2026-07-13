@@ -1,0 +1,36 @@
+{
+  "name": "homebridge-govee-gv2mqtt",
+  "version": "0.1.0",
+  "description": "Homebridge platform plugin for Govee lights exposed via govee2mqtt (gv2mqtt), supporting multiple physical devices with brightness, color temperature, RGB color, adaptive lighting and scene effects.",
+  "main": "dist/index.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WhyElEss/homebridge-govee-gv2mqtt.git"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "govee",
+    "mqtt",
+    "gv2mqtt"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "homebridge": ">=1.6.0"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc",
+    "watch": "tsc --watch",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "homebridge": "^1.8.0",
+    "rimraf": "^5.0.0",
+    "typescript": "^5.5.0"
+  }
+}
