@@ -96,6 +96,23 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       setInterval(() => pingHomeAssistantBirth(), periodicRefreshIntervalMs);
     }
 
+    // A newly auto-discovered device's own GoveeDevice subscribes to its
+    // discovery-config topic *after* this burst of messages already went by,
+    // so it starts out on the fallback effect list. Ping again shortly after
+    // discovery quiets down so it picks up its real list without waiting for
+    // the next reconnect/periodic refresh. Debounced so a whole burst of new
+    // devices only triggers one extra ping.
+    let rediscoveryPingTimer: NodeJS.Timeout | undefined;
+    const scheduleFollowUpPing = () => {
+      if (!refreshStateOnConnect) {
+        return;
+      }
+      if (rediscoveryPingTimer) {
+        clearTimeout(rediscoveryPingTimer);
+      }
+      rediscoveryPingTimer = setTimeout(() => pingHomeAssistantBirth(), 3000);
+    };
+
     for (const deviceCfg of devices) {
       if (excludedDeviceIds.has(deviceCfg.deviceId)) {
         this.log.warn(
@@ -109,7 +126,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
 
     if (autoDiscover) {
-      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, excludedDeviceIds);
+      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, excludedDeviceIds, scheduleFollowUpPing);
     }
 
     // With autoDiscover, newly-found devices only show up asynchronously as
@@ -131,14 +148,22 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
    * device ID from the topic and filters out unrelated MQTT lights that
    * might share the same broker/discovery prefix but weren't published by
    * gv2mqtt (their unique_id won't match "gv2mqtt-<id>").
+   *
+   * gv2mqtt also publishes one extra discovery config per addressable LED
+   * segment on segmented devices, with a unique_id of "gv2mqtt-<id>-<n>" -
+   * these are sub-entities of a device already covered by its main config,
+   * not separate physical devices, and are skipped (real device IDs are
+   * plain hex with no hyphen, so a trailing "-<digits>" is unambiguous).
    */
   private setupAutoDiscovery(
     topicPrefix: string,
     haDiscoveryPrefix: string,
     optimisticCacheMs: number,
     excludedDeviceIds: Set<string>,
+    scheduleFollowUpPing: () => void,
   ): void {
     const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/gv2mqtt-([^/]+)/config$`);
+    const segmentSuffix = /-\d+$/;
 
     this.client!.subscribe(`${haDiscoveryPrefix}/light/+/config`, (err) => {
       if (err) {
@@ -152,6 +177,9 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         return;
       }
       const deviceId = match[1];
+      if (segmentSuffix.test(deviceId)) {
+        return;
+      }
       if (excludedDeviceIds.has(deviceId) || this.knownDeviceIds.has(deviceId)) {
         return;
       }
@@ -168,6 +196,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       const resolved = resolveDeviceConfig({ deviceId, name }, topicPrefix, haDiscoveryPrefix);
       this.registerDevice(resolved, optimisticCacheMs);
       this.knownDeviceIds.add(deviceId);
+      scheduleFollowUpPing();
     });
   }
 
