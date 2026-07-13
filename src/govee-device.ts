@@ -54,6 +54,7 @@ export class GoveeDevice extends EventEmitter {
   private lastLocalSetAt = 0;
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
   private hueSatFlushTimer?: NodeJS.Timeout;
+  private effectReassertTimer?: NodeJS.Timeout;
 
   /**
    * Stable name<->identifier mapping, shared by this device's own effectIndex
@@ -387,18 +388,22 @@ export class GoveeDevice extends EventEmitter {
       // several seconds earlier (e.g. Adaptive Lighting's periodic nudge),
       // settling on plain color mode several seconds later even though the
       // effect command was published last - observed settling as late as
-      // ~5s after the effect command in practice. Re-assert it a few times
-      // over a wider window, if nothing has since changed the selection, to
-      // win that race regardless of exactly how long it takes to resolve.
-      const reassertIndex = index;
-      for (const delayMs of [2000, 5000, 10000]) {
-        setTimeout(() => {
-          if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
-            this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" (+${delayMs}ms) to guard against a server-side race`);
-            this.publish({ state: 'ON', effect: name });
-          }
-        }, delayMs);
+      // ~5s after the effect command in practice. Re-assert it once more,
+      // if nothing has since changed the selection, to win that race.
+      // Single shot and cancelled/replaced on every call (rather than firing
+      // at several delays) so paging quickly through effects by hand in Home
+      // doesn't pile up a burst of redundant re-sends behind it.
+      if (this.effectReassertTimer) {
+        clearTimeout(this.effectReassertTimer);
       }
+      const reassertIndex = index;
+      this.effectReassertTimer = setTimeout(() => {
+        this.effectReassertTimer = undefined;
+        if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
+          this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" to guard against a server-side race`);
+          this.publish({ state: 'ON', effect: name });
+        }
+      }, 5000);
     }
     this.emit('change', this.getState());
   }
