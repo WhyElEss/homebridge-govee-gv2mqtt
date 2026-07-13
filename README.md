@@ -155,14 +155,6 @@ where an edit made through Config UI X at the exact same moment could get
 lost. If the write fails for any reason (permissions, etc.) the device still
 works for that session - it'll just need rediscovering on the next restart.
 
-### Migrating from the old config
-
-Remove the two `mqttthing` accessory blocks and the `platforms` entry for this
-plugin's predecessor (there wasn't one — it was two loose accessories), then
-add one platform block as above with one `devices[]` entry per physical light
-you had. The device ID `18DFD0C806467677` in the sample config above is taken
-directly from the original topics.
-
 ## Behavior notes / intentional differences from the original config
 
 - **Effect detection from the device side is no longer "sticky."** The
