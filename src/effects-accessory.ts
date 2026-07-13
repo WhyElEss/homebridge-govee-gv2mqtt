@@ -48,6 +48,11 @@ export class EffectsAccessory {
 
     this.service =
       accessory.getService(Svc.Television) ?? accessory.addService(Svc.Television, `${device.config.name} Effects`);
+    // Accessories hosted inside a bridge (as ours are) get their Home app tile
+    // icon from whichever service is marked primary, not from the accessory's
+    // `category` - without this, Home falls back to a generic "house" icon
+    // instead of the TV icon.
+    this.service.setPrimaryService(true);
     this.service.setCharacteristic(Characteristic.ConfiguredName, `${device.config.name} Effects`);
     this.service.setCharacteristic(
       Characteristic.SleepDiscoveryMode,
