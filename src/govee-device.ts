@@ -185,6 +185,18 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setOn(on: boolean): void {
+    const wasOn = this.state.isOn;
+
+    if (on && wasOn) {
+      // Already on - this is a redundant "on" (e.g. Adaptive Lighting
+      // re-asserting state a few seconds after the Lightbulb and Effects
+      // accessories' shared isOn flips to true, or Home resending state for
+      // any other reason), not a real off->on transition. Applying our
+      // normal "turn on" behavior here would reset an effect that was just
+      // selected via the Effects accessory back to Normal Light.
+      return;
+    }
+
     this.markLocalChange();
     this.state.isOn = on;
     this.state.mode = 'adaptive';
