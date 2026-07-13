@@ -98,6 +98,7 @@ export class GoveeDevice extends EventEmitter {
   }
 
   private publish(payload: Record<string, unknown>): void {
+    this.log.debug(`[${this.config.name}] Publishing MQTT: ${this.config.commandTopic} = ${JSON.stringify(payload)}`);
     this.client.publish(this.config.commandTopic, JSON.stringify(payload));
   }
 
@@ -106,6 +107,7 @@ export class GoveeDevice extends EventEmitter {
   }
 
   private handleMessage(payload: string): void {
+    this.log.debug(`[${this.config.name}] Received MQTT: ${this.config.stateTopic} = ${payload}`);
     let msg: IncomingMessage;
     try {
       msg = JSON.parse(payload);
@@ -186,6 +188,7 @@ export class GoveeDevice extends EventEmitter {
 
   setOn(on: boolean): void {
     const wasOn = this.state.isOn;
+    this.log.debug(`[${this.config.name}] setOn(${on}) - wasOn=${wasOn}, mode=${this.state.mode}`);
 
     if (on && wasOn) {
       // Already on - this is a redundant "on" (e.g. Adaptive Lighting
@@ -194,6 +197,7 @@ export class GoveeDevice extends EventEmitter {
       // any other reason), not a real off->on transition. Applying our
       // normal "turn on" behavior here would reset an effect that was just
       // selected via the Effects accessory back to Normal Light.
+      this.log.debug(`[${this.config.name}] setOn: no-op (already on)`);
       return;
     }
 
@@ -212,6 +216,10 @@ export class GoveeDevice extends EventEmitter {
   setBrightness(brightness: number): void {
     const rounded = Math.round(brightness);
     const changed = rounded !== this.state.brightness;
+    this.log.debug(
+      `[${this.config.name}] setBrightness(${rounded}) - was=${this.state.brightness}, changed=${changed}, ` +
+        `isOn=${this.state.isOn}, mode=${this.state.mode}`,
+    );
     this.markLocalChange();
     this.state.brightness = rounded;
     if (!this.state.isOn) {
@@ -224,8 +232,10 @@ export class GoveeDevice extends EventEmitter {
         // also just selected an effect via the Effects accessory). Treat a
         // no-op resend as just that, not as a user dragging the brightness
         // slider to explicitly back out of the effect.
+        this.log.debug(`[${this.config.name}] setBrightness: no-op resend, staying in effect mode`);
         return;
       }
+      this.log.debug(`[${this.config.name}] setBrightness: exiting effect mode (real brightness change)`);
       this.state.mode = 'adaptive';
       this.state.effectIndex = 1;
       this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
@@ -236,6 +246,9 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setColorTemperature(mireds: number): void {
+    this.log.debug(
+      `[${this.config.name}] setColorTemperature(${Math.round(mireds)}) - isOn=${this.state.isOn}, mode=${this.state.mode}`,
+    );
     this.markLocalChange();
     this.state.mireds = Math.round(mireds);
     if (!this.state.isOn || this.state.mode === 'effect') {
@@ -247,10 +260,12 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setHue(hue: number): void {
+    this.log.debug(`[${this.config.name}] setHue(${hue})`);
     this.queueHueSat({ hue });
   }
 
   setSaturation(saturation: number): void {
+    this.log.debug(`[${this.config.name}] setSaturation(${saturation})`);
     this.queueHueSat({ saturation });
   }
 
@@ -306,8 +321,9 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setEffectIndex(index: number): void {
-    this.markLocalChange();
     const name = this.state.effectNames[index - 1];
+    this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
+    this.markLocalChange();
     if (index <= 1 || !name) {
       this.state.effectIndex = 1;
       this.state.mode = 'adaptive';
