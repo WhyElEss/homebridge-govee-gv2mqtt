@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { Logger } from 'homebridge';
 import { MqttClient } from 'mqtt';
 import { ResolvedDeviceConfig } from './config';
-import { EFFECT_NAMES, effectIndexByName } from './effects';
+import { WIRE_EFFECT_NAMES, effectIndexByName } from './effects';
 import { hueSatToRgb, rgbToHueSat } from './color';
 
 export type GoveeColorMode = 'adaptive' | 'rgb' | 'effect';
@@ -235,7 +235,7 @@ export class GoveeDevice extends EventEmitter {
     } else {
       this.state.effectIndex = index;
       this.state.mode = 'effect';
-      this.publish({ state: 'ON', effect: EFFECT_NAMES[index - 1] });
+      this.publish({ state: 'ON', effect: WIRE_EFFECT_NAMES[index - 1] });
     }
     this.emit('change', this.getState());
   }

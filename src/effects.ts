@@ -22,10 +22,25 @@ export const EFFECT_NAMES: string[] = [
 ];
 
 /**
+ * The Govee bridge expects/reports a handful of effect names with a non-breaking
+ * space (U+00A0) between words instead of a normal space, even though they look
+ * identical. Sending or matching the plain-space form for these makes the
+ * effect silently fail to activate. Display names (HomeKit ConfiguredName,
+ * config UI, etc.) should stay on the normal-space form in EFFECT_NAMES; only
+ * wire-level matching/publishing needs WIRE_EFFECT_NAMES.
+ */
+const WIRE_NAME_OVERRIDES: Record<string, string> = {
+  'Spring Wind': 'Spring\u00A0Wind',
+  'Milky Way': 'Milky\u00A0Way',
+};
+
+export const WIRE_EFFECT_NAMES: string[] = EFFECT_NAMES.map((name) => WIRE_NAME_OVERRIDES[name] ?? name);
+
+/**
  * Effect indices are 1-based to match the HomeKit television "Input" identifiers
  * used by the original config (value 1 = "Normal Light", i.e. no effect).
  */
 export function effectIndexByName(name: string, fallback = 1): number {
-  const i = EFFECT_NAMES.indexOf(name);
+  const i = WIRE_EFFECT_NAMES.indexOf(name);
   return i === -1 ? fallback : i + 1;
 }
