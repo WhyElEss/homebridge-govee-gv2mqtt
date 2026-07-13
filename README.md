@@ -13,19 +13,19 @@ updates over MQTT instead of only responding to HomeKit polling.
 ## Device compatibility
 
 This plugin targets the **Govee Table Lamp** family and is tested against a
-**Govee Table Lamp 2**. The list of 97 scene/DIY/music effect names in
-[src/effects.ts](src/effects.ts) is hard-coded to what that specific model
-reports — it is *not* queried from the device at runtime.
+**Govee Table Lamp 2**. Brightness, color temperature and RGB handling is
+generic Govee light control and should work across the family (Table Lamp
+**1** and **Table Lamp Pro** included) and likely most other Govee lights
+gv2mqtt supports.
 
-Table Lamp **1** and **Table Lamp Pro** should mostly work (same brightness,
-color temperature and RGB handling), but their firmware ships its own,
-different effect name list, so the "Effects" accessory's input names may not
-line up with what the device actually supports — selecting an input by
-position (e.g. "input 12") could apply the wrong effect for that model, or one
-it doesn't have at all. If you're on one of those models and hit mismatched
-effect names, open an issue with your device's actual effect list (visible in
-the Govee app, or in the MQTT `effect` field when you switch effects from the
-app) and it can be added as a per-model override.
+The effect list itself is **discovered per device at runtime** (see below),
+not hard-coded to one model — so Table Lamp 1/Pro (or any other Govee light)
+get *their own* real effect list automatically, not the Table Lamp 2's. The
+97-name static list in [src/effects.ts](src/effects.ts) only exists as a
+fallback for the first ~15s after a restart, or if discovery is unavailable
+for some reason (see "Real effect list per device" below) — that fallback
+list *is* specific to a Table Lamp 2 and may show the wrong names for other
+models during that gap.
 
 ## What each accessory does
 
@@ -33,17 +33,18 @@ For every entry in `devices` the platform creates:
 
 - **`<name>`** — a Lightbulb accessory: On/Off, Brightness, Hue/Saturation,
   Color Temperature, and (optionally) Adaptive Lighting.
-- **`<name> Effects`** — a Television accessory whose "Inputs" are Govee's
-  built-in scene effects (Aurora, Fireplace, Rainbow, ...) **and its music
-  (audio-reactive) modes** (Rhythm, Energic, Hopping, Light Waves, Meteor
-  Shower, Spectrum, ...). Selecting an input switches the light into that
-  effect or music mode; input 1 ("Normal Light") returns it to normal
-  color/color-temperature mode. Because this is a regular HomeKit input
-  selection, music modes can now be triggered manually from the Home app or
-  wired into HomeKit automations (e.g. "when media starts playing on the
-  living room TV, set Govee Table Lamp Effects input to Rhythm") — something
-  the stock Govee HomeKit integration doesn't expose at all. This accessory
-  can be disabled per-device with `enableEffects: false`.
+- **`<name> Effects`** — a Television accessory whose "Inputs" are that
+  specific device's real scene effects (Aurora, Fireplace, Rainbow, ...),
+  **music (audio-reactive) modes** (Rhythm, Energic, Hopping, Light Waves,
+  Meteor Shower, Spectrum, ...), and any DIY scenes you've created for it -
+  discovered live from gv2mqtt (see below). Selecting an input switches the
+  light into that effect or music mode; input 1 ("Normal Light") returns it
+  to normal color/color-temperature mode. Because this is a regular HomeKit
+  input selection, music modes can now be triggered manually from the Home
+  app or wired into HomeKit automations (e.g. "when media starts playing on
+  the living room TV, set Govee Table Lamp Effects input to Rhythm") —
+  something the stock Govee HomeKit integration doesn't expose at all. This
+  accessory can be disabled per-device with `enableEffects: false`.
 
 Both accessories for a device share one `GoveeDevice` instance
 ([src/govee-device.ts](src/govee-device.ts)) that owns the MQTT
@@ -134,6 +135,26 @@ directly from the original topics.
 - **Adaptive Lighting** requires the Home Hub to be on iOS 13+/aligned
   hardware, same as any other lightbulb accessory; it's controlled per-device
   via `adaptiveLighting` in config.
+- **Real effect list per device** (needs `refreshStateOnConnect`, default
+  `true`): gv2mqtt itself fetches each device's actual supported scenes from
+  Govee's official Platform API (per the exact SKU of that model) plus that
+  Govee account's DIY scenes for the device, and republishes the combined
+  list as the `effect_list` field of its Home Assistant MQTT discovery config
+  for the light entity. This plugin subscribes to that discovery config topic
+  (`<haDiscoveryPrefix>/light/<deviceId>/gv2mqtt-<deviceId>/config`) and uses
+  its `effect_list` to build the Effects accessory's inputs, instead of a
+  hard-coded list. **Music modes are part of that same API response** (gv2mqtt
+  internally tags them with a `Music: ` prefix before handing them to the
+  device) - no manual discovery/sniffing step is needed for them. The only
+  thing that still requires a manual step is creating a DIY scene in the
+  first place (that's inherent to what a DIY scene is); once created, gv2mqtt
+  picks it up on its own next scene-list fetch, same as any stock scene.
+  Since gv2mqtt doesn't retain either its state or discovery-config topics, a
+  fresh subscribe alone reveals neither - both only arrive after gv2mqtt's own
+  startup, or after this plugin pings the Home Assistant "birth" topic (see
+  below), which is also why the fallback list exists for the gap in between.
+  Set `effectRefreshIntervalMs` to periodically re-trigger this (e.g. to pick
+  up a newly-created DIY scene) without restarting Homebridge.
 - **Real state after a restart** (`refreshStateOnConnect`, default `true`):
   gv2mqtt publishes its state topics without the MQTT `retain` flag, so simply
   subscribing after a Homebridge/container/broker restart reveals nothing —
@@ -141,8 +162,10 @@ directly from the original topics.
   state change. gv2mqtt does republish every device's current state ~15s after
   seeing *any* message on the Home Assistant "birth" topic (it thinks HA just
   restarted), so on every MQTT connect this plugin publishes `"online"` to
-  `homeassistant/status` (configurable via `haStatusTopic`) to piggyback on
-  that mechanism. This only affects what gets displayed — it has nothing to do
-  with `turnOffOnStartup`, which still defaults to `false` (the original
-  config always forced the light off 10s after Homebridge started; this
-  plugin only does that if you explicitly opt in per-device).
+  `<haDiscoveryPrefix>/status` (default `homeassistant/status`; override with
+  `haStatusTopic` if gv2mqtt's Home Assistant integration listens elsewhere)
+  to piggyback on that mechanism - the same ping that also drives the real
+  effect list discovery above. This only affects what gets displayed — it has
+  nothing to do with `turnOffOnStartup`, which still defaults to `false` (the
+  original config always forced the light off 10s after Homebridge started;
+  this plugin only does that if you explicitly opt in per-device).

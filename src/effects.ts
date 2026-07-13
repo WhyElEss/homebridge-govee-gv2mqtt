@@ -1,10 +1,27 @@
+export const NORMAL_LIGHT = 'Normal Light';
+
 /**
- * Govee scene effect names, in the same order used by the original mqttthing
- * "Govee Table Effects" television accessory. Index 0 is reserved for
- * "Normal Light" (i.e. no effect / plain color-temp-or-color mode).
+ * gv2mqtt reports a couple of effect names with a non-breaking space (U+00A0)
+ * between words instead of a normal space. This only matters for
+ * FALLBACK_EFFECT_NAMES below: once the real per-device list is discovered
+ * (see GoveeDevice), whatever gv2mqtt reports is used verbatim, so this
+ * category of mismatch can't happen there.
  */
-export const EFFECT_NAMES: string[] = [
-  'Normal Light', 'Night Light', 'Reading', 'White Light', 'Accompany', 'Afternoon',
+const FALLBACK_WIRE_OVERRIDES: Record<string, string> = {
+  'Spring Wind': 'Spring\u00A0Wind',
+  'Milky Way': 'Milky\u00A0Way',
+};
+
+/**
+ * Static effect list for a Govee Table Lamp 2, used only until the real
+ * per-device list is discovered from gv2mqtt's Home Assistant MQTT discovery
+ * config for the light entity (see GoveeDevice.effectNames). Keeps the
+ * Effects accessory populated during the ~15s gap right after a restart, and
+ * is a safety net if discovery never arrives (e.g. an older gv2mqtt version).
+ * Other Govee Table Lamp models may report a different real list.
+ */
+export const FALLBACK_EFFECT_NAMES: string[] = [
+  'Night Light', 'Reading', 'White Light', 'Accompany', 'Afternoon',
   'Breathe', 'Dreamland', 'Dreamlike', 'Healing', 'Leisure', 'Morning', 'Refreshing',
   'Soothing', 'Sunrise', 'Sunset', 'Sunset Glow', 'Aurora', 'Cherry blossoms', 'Desert',
   'Falling Petals', 'Feather', 'Fire', 'Firefly', 'Fish Tank', 'Forest', 'Goldfish',
@@ -19,28 +36,25 @@ export const EFFECT_NAMES: string[] = [
   'Halloween', 'Halloween Witches', 'Lightning Bats', 'Poison', 'Easter Egg',
   "Saint Patrick's Day", 'Thanksgiving', "Valentine's Day", 'Colour Painting', 'Dandelion',
   'Energic', 'Hopping', 'Light Waves', 'Meteor Shower', 'Rhythm', 'Spectrum',
-];
+].map((name) => FALLBACK_WIRE_OVERRIDES[name] ?? name);
 
 /**
- * The Govee bridge expects/reports a handful of effect names with a non-breaking
- * space (U+00A0) between words instead of a normal space, even though they look
- * identical. Sending or matching the plain-space form for these makes the
- * effect silently fail to activate. Display names (HomeKit ConfiguredName,
- * config UI, etc.) should stay on the normal-space form in EFFECT_NAMES; only
- * wire-level matching/publishing needs WIRE_EFFECT_NAMES.
+ * Builds the full Television "Inputs" list for a device: index 0 is always
+ * the synthetic "Normal Light" (no effect active - not a real Govee scene),
+ * followed by whatever effect names are currently known for that device -
+ * either the real per-device list discovered over MQTT, or
+ * FALLBACK_EFFECT_NAMES.
  */
-const WIRE_NAME_OVERRIDES: Record<string, string> = {
-  'Spring Wind': 'Spring\u00A0Wind',
-  'Milky Way': 'Milky\u00A0Way',
-};
-
-export const WIRE_EFFECT_NAMES: string[] = EFFECT_NAMES.map((name) => WIRE_NAME_OVERRIDES[name] ?? name);
+export function buildEffectNames(discovered: string[] | null): string[] {
+  const effects = discovered && discovered.length > 0 ? discovered : FALLBACK_EFFECT_NAMES;
+  return [NORMAL_LIGHT, ...effects];
+}
 
 /**
- * Effect indices are 1-based to match the HomeKit television "Input" identifiers
- * used by the original config (value 1 = "Normal Light", i.e. no effect).
+ * Effect indices are 1-based to match the HomeKit television "Input"
+ * identifiers (value 1 = "Normal Light", i.e. no effect).
  */
-export function effectIndexByName(name: string, fallback = 1): number {
-  const i = WIRE_EFFECT_NAMES.indexOf(name);
+export function effectIndexByName(effectNames: string[], name: string, fallback = 1): number {
+  const i = effectNames.indexOf(name);
   return i === -1 ? fallback : i + 1;
 }

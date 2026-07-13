@@ -21,6 +21,8 @@ export interface GoveePlatformConfig extends PlatformConfig {
   optimisticCacheMs?: number;
   refreshStateOnConnect?: boolean;
   haStatusTopic?: string;
+  haDiscoveryPrefix?: string;
+  effectRefreshIntervalMs?: number;
   devices: DeviceConfig[];
 }
 
@@ -36,11 +38,13 @@ export interface ResolvedDeviceConfig {
   turnOffOnStartupDelayMs: number;
   stateTopic: string;
   commandTopic: string;
+  discoveryConfigTopic: string;
 }
 
 export function resolveDeviceConfig(
   device: DeviceConfig,
   topicPrefix: string,
+  haDiscoveryPrefix: string,
 ): ResolvedDeviceConfig {
   return {
     name: device.name,
@@ -54,5 +58,9 @@ export function resolveDeviceConfig(
     turnOffOnStartupDelayMs: device.turnOffOnStartupDelayMs ?? 10000,
     stateTopic: `${topicPrefix}/${device.deviceId}/state`,
     commandTopic: `${topicPrefix}/${device.deviceId}/command`,
+    // gv2mqtt's Home Assistant MQTT discovery config topic for this device's
+    // light entity; its "effect_list" field is the real per-device scene/
+    // music/DIY effect list fetched from Govee's own API. See GoveeDevice.
+    discoveryConfigTopic: `${haDiscoveryPrefix}/light/${device.deviceId}/gv2mqtt-${device.deviceId}/config`,
   };
 }

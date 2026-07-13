@@ -53,32 +53,44 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
 
     const refreshStateOnConnect = cfg.refreshStateOnConnect ?? true;
-    const haStatusTopic = cfg.haStatusTopic ?? 'homeassistant/status';
+    const haDiscoveryPrefix = cfg.haDiscoveryPrefix ?? 'homeassistant';
+    const haStatusTopic = cfg.haStatusTopic ?? `${haDiscoveryPrefix}/status`;
+    const effectRefreshIntervalMs = cfg.effectRefreshIntervalMs ?? 0;
 
     this.client = mqtt.connect(cfg.mqttUrl, {
       username: cfg.mqttUsername,
       password: cfg.mqttPassword,
     });
+
+    const pingHomeAssistantBirth = () => {
+      // gv2mqtt doesn't retain its state or discovery-config topics, so a
+      // fresh subscribe alone reveals neither the light's actual current
+      // state nor its real per-device effect list after a restart. It does,
+      // however, republish both for every device whenever it sees a message
+      // on the Home Assistant "birth" topic (thinking HA just restarted) -
+      // so we piggyback on that instead of showing stale/fallback data until
+      // the light's next unrelated state change.
+      this.client!.publish(haStatusTopic, 'online');
+    };
+
     this.client.on('connect', () => {
       this.log.info(`Connected to MQTT broker at ${cfg.mqttUrl}`);
       if (refreshStateOnConnect) {
-        // gv2mqtt doesn't retain its state topics, so a fresh subscribe alone
-        // won't reveal the light's actual current state after a restart. It
-        // does, however, republish full state for every device whenever it
-        // sees a message on the Home Assistant "birth" topic (thinking HA
-        // just restarted) - so we piggyback on that instead of showing stale
-        // defaults until the light's next unrelated state change.
-        this.client!.publish(haStatusTopic, 'online');
+        pingHomeAssistantBirth();
       }
     });
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 
+    if (refreshStateOnConnect && effectRefreshIntervalMs > 0) {
+      setInterval(() => pingHomeAssistantBirth(), effectRefreshIntervalMs);
+    }
+
     const topicPrefix = cfg.topicPrefix ?? 'gv2mqtt/light';
     const optimisticCacheMs = cfg.optimisticCacheMs ?? 10000;
 
     for (const deviceCfg of devices) {
-      const resolved = resolveDeviceConfig(deviceCfg, topicPrefix);
+      const resolved = resolveDeviceConfig(deviceCfg, topicPrefix, haDiscoveryPrefix);
       this.registerDevice(resolved, optimisticCacheMs);
     }
 

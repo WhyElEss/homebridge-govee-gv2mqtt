@@ -1,16 +1,33 @@
 import { PlatformAccessory, Service } from 'homebridge';
 import { GoveeGv2MqttPlatform } from './platform';
 import { GoveeDevice } from './govee-device';
-import { EFFECT_NAMES } from './effects';
 import { encodeDisplayOrder } from './tlv';
 
+/** HomeKit Television accessories support at most 100 Input Sources. */
+const MAX_INPUTS = 100;
+
+function slugify(name: string): string {
+  return (
+    name
+      .normalize('NFKD')
+      .replace(/[^\w]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .toLowerCase() || 'input'
+  );
+}
+
 /**
- * Exposes Govee's built-in scene effects as a Television accessory's "Inputs",
- * mirroring the original mqttthing hack: HomeKit's Lightbulb service has no
- * concept of named effects, but Television/InputSource does.
+ * Exposes Govee's scene/music/DIY effects as a Television accessory's
+ * "Inputs", mirroring the original mqttthing hack: HomeKit's Lightbulb
+ * service has no concept of named effects, but Television/InputSource does.
+ *
+ * The effect list is per-device and can change at runtime (gv2mqtt
+ * discovers it from Govee's API - see GoveeDevice), so InputSource services
+ * are reconciled reactively instead of being built once at startup.
  */
 export class EffectsAccessory {
   private readonly service: Service;
+  private appliedEffectNames: string[] | null = null;
 
   constructor(
     private readonly platform: GoveeGv2MqttPlatform,
@@ -43,10 +60,36 @@ export class EffectsAccessory {
       .onGet(() => this.device.getState().effectIndex)
       .onSet((value) => this.device.setEffectIndex(value as number));
 
-    EFFECT_NAMES.forEach((name, i) => {
+    this.syncInputs(device.getState().effectNames);
+
+    device.on('change', (state) => {
+      this.service.updateCharacteristic(Characteristic.Active, state.isOn ? 1 : 0);
+      this.service.updateCharacteristic(Characteristic.ActiveIdentifier, state.effectIndex);
+      if (state.effectNames !== this.appliedEffectNames) {
+        this.syncInputs(state.effectNames);
+      }
+    });
+  }
+
+  private syncInputs(namesIn: string[]): void {
+    const { Service: Svc, Characteristic } = this.platform;
+
+    let names = namesIn;
+    if (names.length > MAX_INPUTS) {
+      this.platform.log.warn(
+        `[${this.device.config.name}] ${names.length} effects discovered, HomeKit only supports ${MAX_INPUTS} inputs; truncating.`,
+      );
+      names = names.slice(0, MAX_INPUTS);
+    }
+
+    const seenSubtypes = new Set<string>();
+
+    names.forEach((name, i) => {
       const identifier = i + 1;
-      const subtype = `effect-${identifier}`;
-      const input = accessory.getServiceById(Svc.InputSource, subtype) ?? accessory.addService(Svc.InputSource, name, subtype);
+      const subtype = `effect-${slugify(name)}`;
+      seenSubtypes.add(subtype);
+      const input =
+        this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, name, subtype);
 
       input
         .setCharacteristic(Characteristic.Identifier, identifier)
@@ -58,16 +101,23 @@ export class EffectsAccessory {
       this.service.addLinkedService(input);
     });
 
+    // Drop InputSource services for effects no longer in the list (e.g. a DIY
+    // scene was deleted in the Govee app, or the fallback list is being
+    // replaced by the real discovered one).
+    for (const svc of [...this.accessory.services]) {
+      if (svc.UUID === Svc.InputSource.UUID && svc.subtype && !seenSubtypes.has(svc.subtype)) {
+        this.service.removeLinkedService(svc);
+        this.accessory.removeService(svc);
+      }
+    }
+
     // Home (and other HomeKit controllers) don't reliably fall back to service
     // creation order for the Inputs list; without an explicit DisplayOrder they
     // can show inputs in an arbitrary order even though Identifier->name mapping
     // stays correct.
-    const order = EFFECT_NAMES.map((_, i) => i + 1);
-    this.service.setCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
+    const order = names.map((_, i) => i + 1);
+    this.service.updateCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
 
-    device.on('change', (state) => {
-      this.service.updateCharacteristic(Characteristic.Active, state.isOn ? 1 : 0);
-      this.service.updateCharacteristic(Characteristic.ActiveIdentifier, state.effectIndex);
-    });
+    this.appliedEffectNames = namesIn;
   }
 }

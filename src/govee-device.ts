@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { Logger } from 'homebridge';
 import { MqttClient } from 'mqtt';
 import { ResolvedDeviceConfig } from './config';
-import { WIRE_EFFECT_NAMES, effectIndexByName } from './effects';
+import { buildEffectNames, effectIndexByName } from './effects';
 import { hueSatToRgb, rgbToHueSat } from './color';
 
 export type GoveeColorMode = 'adaptive' | 'rgb' | 'effect';
@@ -16,6 +16,8 @@ export interface GoveeDeviceState {
   mode: GoveeColorMode;
   /** 1-based; matches the television accessory's Input identifiers. 1 = no effect. */
   effectIndex: number;
+  /** Index 0 is always "Normal Light"; see buildEffectNames. */
+  effectNames: string[];
 }
 
 interface IncomingMessage {
@@ -27,6 +29,10 @@ interface IncomingMessage {
   effect?: string;
 }
 
+interface DiscoveryConfigMessage {
+  effect_list?: unknown;
+}
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -35,6 +41,7 @@ const DEFAULT_STATE: GoveeDeviceState = {
   saturation: 0,
   mode: 'adaptive',
   effectIndex: 1,
+  effectNames: buildEffectNames(null),
 };
 
 /**
@@ -61,9 +68,19 @@ export class GoveeDevice extends EventEmitter {
         this.log.error(`[${config.name}] failed to subscribe to ${config.stateTopic}: ${err.message}`);
       }
     });
+    this.client.subscribe(config.discoveryConfigTopic, (err) => {
+      if (err) {
+        this.log.warn(
+          `[${config.name}] failed to subscribe to ${config.discoveryConfigTopic}: ${err.message}` +
+            ' (real per-device effect list will be unavailable; falling back to the built-in list)',
+        );
+      }
+    });
     this.client.on('message', (topic, payload) => {
       if (topic === config.stateTopic) {
         this.handleMessage(payload.toString());
+      } else if (topic === config.discoveryConfigTopic) {
+        this.handleDiscoveryConfig(payload.toString());
       }
     });
 
@@ -106,7 +123,7 @@ export class GoveeDevice extends EventEmitter {
     if (this.state.isOn && !this.withinOptimisticWindow()) {
       if (msg.effect) {
         this.state.mode = 'effect';
-        this.state.effectIndex = effectIndexByName(msg.effect, this.state.effectIndex);
+        this.state.effectIndex = effectIndexByName(this.state.effectNames, msg.effect, this.state.effectIndex);
       } else {
         this.state.mode = msg.color_mode === 'rgb' ? 'rgb' : 'adaptive';
         this.state.effectIndex = 1;
@@ -124,6 +141,46 @@ export class GoveeDevice extends EventEmitter {
       }
     }
 
+    this.emit('change', this.getState());
+  }
+
+  /**
+   * gv2mqtt fetches this device's real scene/music/DIY effect list from
+   * Govee's own API (per the SKU's supported scene library plus the
+   * account's DIY scenes) and republishes it here as part of its Home
+   * Assistant MQTT discovery config for the light entity. Neither this topic
+   * nor the state topic is retained, so this only arrives after gv2mqtt's own
+   * startup or after it sees a Home Assistant "birth" message (see
+   * GoveeGv2MqttPlatform's refreshStateOnConnect).
+   */
+  private handleDiscoveryConfig(payload: string): void {
+    if (!payload) {
+      // Empty payload is Home Assistant's convention for "entity removed";
+      // keep whatever effect list we already have rather than clearing it.
+      return;
+    }
+    let cfg: DiscoveryConfigMessage;
+    try {
+      cfg = JSON.parse(payload);
+    } catch {
+      this.log.warn(`[${this.config.name}] ignoring unparseable discovery config payload`);
+      return;
+    }
+    if (!Array.isArray(cfg.effect_list)) {
+      return;
+    }
+    const names = cfg.effect_list.filter((n): n is string => typeof n === 'string' && n.length > 0);
+    if (names.length === 0) {
+      return;
+    }
+
+    const current = this.state.effectNames.slice(1);
+    if (current.length === names.length && current.every((n, i) => n === names[i])) {
+      return;
+    }
+
+    this.state.effectNames = buildEffectNames(names);
+    this.log.info(`[${this.config.name}] Discovered ${names.length} real effect(s) from gv2mqtt`);
     this.emit('change', this.getState());
   }
 
@@ -228,14 +285,15 @@ export class GoveeDevice extends EventEmitter {
 
   setEffectIndex(index: number): void {
     this.markLocalChange();
-    if (index <= 1) {
+    const name = this.state.effectNames[index - 1];
+    if (index <= 1 || !name) {
       this.state.effectIndex = 1;
       this.state.mode = 'adaptive';
       this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
     } else {
       this.state.effectIndex = index;
       this.state.mode = 'effect';
-      this.publish({ state: 'ON', effect: WIRE_EFFECT_NAMES[index - 1] });
+      this.publish({ state: 'ON', effect: name });
     }
     this.emit('change', this.getState());
   }

@@ -2,7 +2,7 @@
   "pluginAlias": "GoveeGv2Mqtt",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Controls Govee lights through a [govee2mqtt](https://github.com/wez/govee2mqtt) bridge. Each device below becomes a Lightbulb accessory, plus an optional Television-style accessory used to pick built-in Govee scene effects.",
+  "headerDisplay": "Controls Govee lights through a [govee2mqtt](https://github.com/wez/govee2mqtt) bridge. Each device below becomes a Lightbulb accessory, plus an optional Television-style accessory used to pick Govee's scene/music/DIY effects for that specific device (auto-discovered from gv2mqtt; falls back to a static list if discovery is unavailable).",
   "schema": {
     "type": "object",
     "properties": {
@@ -52,11 +52,24 @@
         "default": true,
         "description": "gv2mqtt doesn't retain its state topics, so on its own Homebridge would show stale/default values until a device's next unrelated state change. Enabling this pings the Home Assistant \"birth\" topic on every MQTT (re)connect, which makes gv2mqtt republish every device's real current state a few seconds later."
       },
+      "haDiscoveryPrefix": {
+        "title": "Home Assistant Discovery Prefix",
+        "type": "string",
+        "default": "homeassistant",
+        "description": "Must match gv2mqtt's own Home Assistant discovery prefix setting. Used both to derive the status topic below (unless overridden) and to find each device's discovered effect list."
+      },
       "haStatusTopic": {
         "title": "Home Assistant Status Topic",
         "type": "string",
-        "default": "homeassistant/status",
-        "description": "Only change this if gv2mqtt is configured with a non-default Home Assistant discovery prefix."
+        "placeholder": "<haDiscoveryPrefix>/status",
+        "description": "Leave blank to derive from Home Assistant Discovery Prefix above. Only set this if gv2mqtt listens on a non-standard status topic."
+      },
+      "effectRefreshIntervalMs": {
+        "title": "Effect List Refresh Interval (ms)",
+        "type": "integer",
+        "default": 0,
+        "minimum": 0,
+        "description": "Re-pings gv2mqtt on this interval so newly-created Govee DIY scenes show up without a Homebridge restart. 0 disables periodic refresh (the effect list still refreshes on every MQTT reconnect)."
       },
       "devices": {
         "title": "Devices",
@@ -127,7 +140,9 @@
     "debounceRecvMs",
     "optimisticCacheMs",
     "refreshStateOnConnect",
+    "haDiscoveryPrefix",
     "haStatusTopic",
+    "effectRefreshIntervalMs",
     {
       "key": "devices",
       "type": "array",
