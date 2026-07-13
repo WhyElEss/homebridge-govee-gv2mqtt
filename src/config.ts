@@ -22,8 +22,10 @@ export interface GoveePlatformConfig extends PlatformConfig {
   refreshStateOnConnect?: boolean;
   haStatusTopic?: string;
   haDiscoveryPrefix?: string;
-  effectRefreshIntervalMs?: number;
-  devices: DeviceConfig[];
+  periodicRefreshIntervalMs?: number;
+  autoDiscover?: boolean;
+  excludedDeviceIds?: string[];
+  devices?: DeviceConfig[];
 }
 
 export interface ResolvedDeviceConfig {

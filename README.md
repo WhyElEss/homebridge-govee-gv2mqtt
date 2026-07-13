@@ -6,9 +6,10 @@ A Homebridge dynamic platform plugin for Govee lights exposed through a
 It replaces a `mqttthing`-based config that hand-rolled two accessories per
 light (a Lightbulb and a Television used only to pick scene effects) sharing
 state via a global JS object. This plugin supports **any number of physical
-devices**, each configured as one entry in `devices`, and keeps the same
-Lightbulb + "Effects" Television pairing per device, but with proper push
-updates over MQTT instead of only responding to HomeKit polling.
+devices**, either listed explicitly in `devices` or auto-discovered (see
+below), and keeps the same Lightbulb + "Effects" Television pairing per
+device, but with proper push updates over MQTT instead of only responding to
+HomeKit polling.
 
 ## Device compatibility
 
@@ -105,6 +106,41 @@ default as the original config (`minMireds: 111`, `maxMireds: 500`,
 `<topicPrefix>/<deviceId>/state` and `.../command` — the same value that was
 previously hard-coded into every topic string in the old `mqttthing` config.
 
+### Auto-discovering devices instead of listing them by hand
+
+Set `autoDiscover: true` and `devices` becomes optional:
+
+```json
+{
+  "platform": "GoveeGv2Mqtt",
+  "name": "Govee (gv2mqtt)",
+  "mqttUrl": "mqtt://mosquitto:1883",
+  "autoDiscover": true,
+  "excludedDeviceIds": ["AABBCC1122334455"]
+}
+```
+
+Every Govee device gv2mqtt reports gets exposed automatically (name pulled
+from its Home Assistant discovery config, same source as the effect list),
+so you don't need to know/type any `deviceId` up front. Two ways to opt a
+specific device out:
+
+- **`excludedDeviceIds`**: a hard block, e.g. a lamp you'd rather keep on a
+  different plugin/app, or don't want in HomeKit at all.
+- **Explicit `devices[]` entries still work alongside `autoDiscover`** — for
+  a `deviceId` that's also in `devices[]`, that entry's settings (name,
+  `minMireds`, `enableEffects`, etc.) win instead of the auto-discovered
+  defaults; it doesn't get double-registered.
+
+Without `autoDiscover`, `devices[]` is the only source of truth (an allowlist
+— nothing shows up in HomeKit unless it's listed), which is the safer default
+for a shared/production Home setup where a device silently appearing on its
+own isn't desirable. New devices are picked up as gv2mqtt announces them,
+which (like the effect list and state refresh) depends on
+`refreshStateOnConnect`/`periodicRefreshIntervalMs` below — a device added to
+your Govee account won't show up in HomeKit until the next birth-topic ping
+after gv2mqtt itself has learned about it.
+
 ### Migrating from the old config
 
 Remove the two `mqttthing` accessory blocks and the `platforms` entry for this
@@ -153,8 +189,9 @@ directly from the original topics.
   fresh subscribe alone reveals neither - both only arrive after gv2mqtt's own
   startup, or after this plugin pings the Home Assistant "birth" topic (see
   below), which is also why the fallback list exists for the gap in between.
-  Set `effectRefreshIntervalMs` to periodically re-trigger this (e.g. to pick
-  up a newly-created DIY scene) without restarting Homebridge.
+  Set `periodicRefreshIntervalMs` to periodically re-trigger this (e.g. to
+  pick up a newly-created DIY scene, or - with `autoDiscover` - a newly-added
+  device) without restarting Homebridge.
 - **Real state after a restart** (`refreshStateOnConnect`, default `true`):
   gv2mqtt publishes its state topics without the MQTT `retain` flag, so simply
   subscribing after a Homebridge/container/broker restart reveals nothing —

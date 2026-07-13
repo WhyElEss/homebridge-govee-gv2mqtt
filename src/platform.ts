@@ -14,12 +14,18 @@ import { GoveeDevice } from './govee-device';
 import { LightAccessory } from './light-accessory';
 import { EffectsAccessory } from './effects-accessory';
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
   public readonly Characteristic: typeof Characteristic;
 
   /** Cached accessories restored from disk, keyed by UUID, plus any newly registered. */
   private readonly accessories = new Map<string, PlatformAccessory>();
+  /** Device IDs registered so far this run, whether from config or auto-discovery. */
+  private readonly knownDeviceIds = new Set<string>();
   private client?: MqttClient;
 
   constructor(
@@ -48,14 +54,18 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       return;
     }
     const devices = cfg.devices ?? [];
-    if (devices.length === 0) {
-      this.log.warn('No devices configured for this platform.');
+    const autoDiscover = cfg.autoDiscover ?? false;
+    const excludedDeviceIds = new Set(cfg.excludedDeviceIds ?? []);
+    if (devices.length === 0 && !autoDiscover) {
+      this.log.warn('No devices configured and autoDiscover is off; nothing to expose.');
     }
 
     const refreshStateOnConnect = cfg.refreshStateOnConnect ?? true;
     const haDiscoveryPrefix = cfg.haDiscoveryPrefix ?? 'homeassistant';
     const haStatusTopic = cfg.haStatusTopic ?? `${haDiscoveryPrefix}/status`;
-    const effectRefreshIntervalMs = cfg.effectRefreshIntervalMs ?? 0;
+    const periodicRefreshIntervalMs = cfg.periodicRefreshIntervalMs ?? 0;
+    const topicPrefix = cfg.topicPrefix ?? 'gv2mqtt/light';
+    const optimisticCacheMs = cfg.optimisticCacheMs ?? 10000;
 
     this.client = mqtt.connect(cfg.mqttUrl, {
       username: cfg.mqttUsername,
@@ -64,12 +74,12 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
 
     const pingHomeAssistantBirth = () => {
       // gv2mqtt doesn't retain its state or discovery-config topics, so a
-      // fresh subscribe alone reveals neither the light's actual current
-      // state nor its real per-device effect list after a restart. It does,
-      // however, republish both for every device whenever it sees a message
-      // on the Home Assistant "birth" topic (thinking HA just restarted) -
-      // so we piggyback on that instead of showing stale/fallback data until
-      // the light's next unrelated state change.
+      // fresh subscribe alone reveals neither a light's actual current state,
+      // its real per-device effect list, nor (with autoDiscover) which
+      // devices even exist. It does, however, republish full discovery
+      // config + state for every device whenever it sees a message on the
+      // Home Assistant "birth" topic (thinking HA just restarted) - so we
+      // piggyback on that for all three instead of waiting indefinitely.
       this.client!.publish(haStatusTopic, 'online');
     };
 
@@ -82,19 +92,83 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 
-    if (refreshStateOnConnect && effectRefreshIntervalMs > 0) {
-      setInterval(() => pingHomeAssistantBirth(), effectRefreshIntervalMs);
+    if (refreshStateOnConnect && periodicRefreshIntervalMs > 0) {
+      setInterval(() => pingHomeAssistantBirth(), periodicRefreshIntervalMs);
     }
-
-    const topicPrefix = cfg.topicPrefix ?? 'gv2mqtt/light';
-    const optimisticCacheMs = cfg.optimisticCacheMs ?? 10000;
 
     for (const deviceCfg of devices) {
+      if (excludedDeviceIds.has(deviceCfg.deviceId)) {
+        this.log.warn(
+          `"${deviceCfg.name}" (${deviceCfg.deviceId}) is both listed in devices and in excludedDeviceIds; excluding it.`,
+        );
+        continue;
+      }
       const resolved = resolveDeviceConfig(deviceCfg, topicPrefix, haDiscoveryPrefix);
       this.registerDevice(resolved, optimisticCacheMs);
+      this.knownDeviceIds.add(deviceCfg.deviceId);
     }
 
-    this.pruneStaleAccessories(devices);
+    if (autoDiscover) {
+      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, excludedDeviceIds);
+    }
+
+    // With autoDiscover, newly-found devices only show up asynchronously as
+    // MQTT discovery messages arrive (typically within ~15s of the birth
+    // ping above), so pruning immediately would delete their just-restored
+    // cached accessories before we've had a chance to reconfirm them. Delay
+    // pruning to give that a chance to happen first; without autoDiscover,
+    // the expected device set is fully known synchronously, so prune right
+    // away as before.
+    const pruneDelayMs = autoDiscover ? 20000 : 0;
+    setTimeout(() => this.pruneStaleAccessories(devices), pruneDelayMs);
+  }
+
+  /**
+   * Subscribes to the wildcard form of the per-device Home Assistant MQTT
+   * discovery config topic (see resolveDeviceConfig's discoveryConfigTopic)
+   * to learn which Govee devices exist on this gv2mqtt bridge without the
+   * user having to list every deviceId by hand. The regex both extracts the
+   * device ID from the topic and filters out unrelated MQTT lights that
+   * might share the same broker/discovery prefix but weren't published by
+   * gv2mqtt (their unique_id won't match "gv2mqtt-<same id>").
+   */
+  private setupAutoDiscovery(
+    topicPrefix: string,
+    haDiscoveryPrefix: string,
+    optimisticCacheMs: number,
+    excludedDeviceIds: Set<string>,
+  ): void {
+    const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/([^/]+)/gv2mqtt-\\1/config$`);
+
+    this.client!.subscribe(`${haDiscoveryPrefix}/light/+/+/config`, (err) => {
+      if (err) {
+        this.log.warn(`autoDiscover: failed to subscribe for new devices: ${err.message}`);
+      }
+    });
+
+    this.client!.on('message', (topic, payload) => {
+      const match = topicPattern.exec(topic);
+      if (!match) {
+        return;
+      }
+      const deviceId = match[1];
+      if (excludedDeviceIds.has(deviceId) || this.knownDeviceIds.has(deviceId)) {
+        return;
+      }
+
+      let name = deviceId;
+      try {
+        const parsed = JSON.parse(payload.toString());
+        name = parsed?.device?.name || parsed?.name || deviceId;
+      } catch {
+        // Fall back to the raw device ID as the display name.
+      }
+
+      this.log.info(`autoDiscover: found new device "${name}" (${deviceId})`);
+      const resolved = resolveDeviceConfig({ deviceId, name }, topicPrefix, haDiscoveryPrefix);
+      this.registerDevice(resolved, optimisticCacheMs);
+      this.knownDeviceIds.add(deviceId);
+    });
   }
 
   private registerDevice(resolved: ResolvedDeviceConfig, optimisticCacheMs: number): void {
@@ -140,11 +214,14 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   }
 
   private pruneStaleAccessories(devices: DeviceConfig[]): void {
+    const deviceConfigById = new Map(devices.map((d) => [d.deviceId, d]));
+
     const expectedUuids = new Set<string>();
-    for (const d of devices) {
-      expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${d.deviceId}-light`));
-      if (d.enableEffects ?? true) {
-        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${d.deviceId}-effects`));
+    for (const id of this.knownDeviceIds) {
+      expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-light`));
+      const enableEffects = deviceConfigById.get(id)?.enableEffects ?? true;
+      if (enableEffects) {
+        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-effects`));
       }
     }
 
@@ -157,7 +234,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
 
     if (stale.length > 0) {
-      this.log.info(`Removing ${stale.length} stale accessory(ies) no longer present in config.`);
+      this.log.info(`Removing ${stale.length} stale accessory(ies) no longer present in config or discovery.`);
       this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
     }
   }

@@ -64,17 +64,31 @@
         "placeholder": "<haDiscoveryPrefix>/status",
         "description": "Leave blank to derive from Home Assistant Discovery Prefix above. Only set this if gv2mqtt listens on a non-standard status topic."
       },
-      "effectRefreshIntervalMs": {
-        "title": "Effect List Refresh Interval (ms)",
+      "periodicRefreshIntervalMs": {
+        "title": "Periodic Refresh Interval (ms)",
         "type": "integer",
         "default": 0,
         "minimum": 0,
-        "description": "Re-pings gv2mqtt on this interval so newly-created Govee DIY scenes show up without a Homebridge restart. 0 disables periodic refresh (the effect list still refreshes on every MQTT reconnect)."
+        "description": "Re-pings gv2mqtt on this interval so newly-created Govee DIY scenes and (with Auto-Discover Devices on) newly-added devices show up without a Homebridge restart. 0 disables periodic refresh (everything still refreshes on every MQTT reconnect)."
+      },
+      "autoDiscover": {
+        "title": "Auto-Discover Devices",
+        "type": "boolean",
+        "default": false,
+        "description": "Automatically expose every Govee device gv2mqtt reports, instead of only the ones listed below. Devices can still be listed below anyway to override their settings (name, mireds range, etc). Use \"Excluded Device IDs\" to keep specific devices out of HomeKit."
+      },
+      "excludedDeviceIds": {
+        "title": "Excluded Device IDs",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Device IDs to never expose to HomeKit, whether they'd otherwise come from Auto-Discover Devices or from the list below - e.g. a lamp you'd rather control with a different plugin/app."
       },
       "devices": {
         "title": "Devices",
         "type": "array",
-        "required": true,
+        "description": "Required if Auto-Discover Devices is off. If it's on, entries here override settings for that specific device ID instead of adding a new one.",
         "items": {
           "type": "object",
           "properties": {
@@ -142,7 +156,9 @@
     "refreshStateOnConnect",
     "haDiscoveryPrefix",
     "haStatusTopic",
-    "effectRefreshIntervalMs",
+    "periodicRefreshIntervalMs",
+    "autoDiscover",
+    "excludedDeviceIds",
     {
       "key": "devices",
       "type": "array",
