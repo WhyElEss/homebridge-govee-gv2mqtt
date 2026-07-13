@@ -52,11 +52,25 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       this.log.warn('No devices configured for this platform.');
     }
 
+    const refreshStateOnConnect = cfg.refreshStateOnConnect ?? true;
+    const haStatusTopic = cfg.haStatusTopic ?? 'homeassistant/status';
+
     this.client = mqtt.connect(cfg.mqttUrl, {
       username: cfg.mqttUsername,
       password: cfg.mqttPassword,
     });
-    this.client.on('connect', () => this.log.info(`Connected to MQTT broker at ${cfg.mqttUrl}`));
+    this.client.on('connect', () => {
+      this.log.info(`Connected to MQTT broker at ${cfg.mqttUrl}`);
+      if (refreshStateOnConnect) {
+        // gv2mqtt doesn't retain its state topics, so a fresh subscribe alone
+        // won't reveal the light's actual current state after a restart. It
+        // does, however, republish full state for every device whenever it
+        // sees a message on the Home Assistant "birth" topic (thinking HA
+        // just restarted) - so we piggyback on that instead of showing stale
+        // defaults until the light's next unrelated state change.
+        this.client!.publish(haStatusTopic, 'online');
+      }
+    });
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 

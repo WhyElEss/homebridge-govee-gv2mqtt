@@ -111,3 +111,15 @@ directly from the original topics.
 - **Adaptive Lighting** requires the Home Hub to be on iOS 13+/aligned
   hardware, same as any other lightbulb accessory; it's controlled per-device
   via `adaptiveLighting` in config.
+- **Real state after a restart** (`refreshStateOnConnect`, default `true`):
+  gv2mqtt publishes its state topics without the MQTT `retain` flag, so simply
+  subscribing after a Homebridge/container/broker restart reveals nothing —
+  Home would keep showing stale defaults until the light's next unrelated
+  state change. gv2mqtt does republish every device's current state ~15s after
+  seeing *any* message on the Home Assistant "birth" topic (it thinks HA just
+  restarted), so on every MQTT connect this plugin publishes `"online"` to
+  `homeassistant/status` (configurable via `haStatusTopic`) to piggyback on
+  that mechanism. This only affects what gets displayed — it has nothing to do
+  with `turnOffOnStartup`, which still defaults to `false` (the original
+  config always forced the light off 10s after Homebridge started; this
+  plugin only does that if you explicitly opt in per-device).

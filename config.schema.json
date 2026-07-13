@@ -46,6 +46,18 @@
         "minimum": 0,
         "description": "How long a locally-set value is trusted before falling back to the device-reported value, to avoid HomeKit UI flicker while the round trip to the device completes."
       },
+      "refreshStateOnConnect": {
+        "title": "Refresh Real State On (Re)connect",
+        "type": "boolean",
+        "default": true,
+        "description": "gv2mqtt doesn't retain its state topics, so on its own Homebridge would show stale/default values until a device's next unrelated state change. Enabling this pings the Home Assistant \"birth\" topic on every MQTT (re)connect, which makes gv2mqtt republish every device's real current state a few seconds later."
+      },
+      "haStatusTopic": {
+        "title": "Home Assistant Status Topic",
+        "type": "string",
+        "default": "homeassistant/status",
+        "description": "Only change this if gv2mqtt is configured with a non-default Home Assistant discovery prefix."
+      },
       "devices": {
         "title": "Devices",
         "type": "array",
@@ -114,6 +126,8 @@
     "topicPrefix",
     "debounceRecvMs",
     "optimisticCacheMs",
+    "refreshStateOnConnect",
+    "haStatusTopic",
     {
       "key": "devices",
       "type": "array",

@@ -19,6 +19,8 @@ export interface GoveePlatformConfig extends PlatformConfig {
   topicPrefix?: string;
   debounceRecvMs?: number;
   optimisticCacheMs?: number;
+  refreshStateOnConnect?: boolean;
+  haStatusTopic?: string;
   devices: DeviceConfig[];
 }
 
