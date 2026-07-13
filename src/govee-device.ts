@@ -117,7 +117,14 @@ export class GoveeDevice extends EventEmitter {
     }
 
     this.state.isOn = msg.state === 'ON';
-    if (!this.state.isOn) {
+    if (!this.state.isOn && !this.withinOptimisticWindow()) {
+      // Only trust an "off" report enough to reset mode/effect bookkeeping
+      // once we're past the optimistic window. gv2mqtt/Govee's cloud can
+      // report a spurious/transient "off" a moment after we've just
+      // published an "on with effect" command (seemingly an eventual-
+      // consistency race server-side, not anything this plugin published) -
+      // still reflect isOn honestly either way, but don't let a blip like
+      // that wipe out an effect selection that was just made.
       this.state.mode = 'adaptive';
       this.state.effectIndex = 1;
     }
@@ -339,6 +346,19 @@ export class GoveeDevice extends EventEmitter {
       this.state.effectIndex = index;
       this.state.mode = 'effect';
       this.publish({ state: 'ON', effect: name });
+      // Govee's own cloud API appears to be able to race an effect/scene
+      // command against an unrelated color-temperature command issued a few
+      // seconds earlier (e.g. Adaptive Lighting's periodic nudge), settling
+      // on plain color mode a few seconds later even though the effect
+      // command was published last. Re-assert it once more shortly after,
+      // if nothing has since changed the selection, to win that race.
+      const reassertIndex = index;
+      setTimeout(() => {
+        if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
+          this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" to guard against a server-side race`);
+          this.publish({ state: 'ON', effect: name });
+        }
+      }, 3000);
     }
     this.emit('change', this.getState());
   }
