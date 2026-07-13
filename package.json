@@ -1,6 +1,6 @@
 {
   "name": "homebridge-govee-gv2mqtt",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Homebridge platform plugin for Govee lights exposed via govee2mqtt (gv2mqtt), supporting multiple physical devices with brightness, color temperature, RGB color, adaptive lighting and scene effects.",
   "main": "dist/index.js",
   "license": "Apache-2.0",

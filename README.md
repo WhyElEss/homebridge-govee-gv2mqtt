@@ -115,22 +115,28 @@ Set `autoDiscover: true` and `devices` becomes optional:
   "platform": "GoveeGv2Mqtt",
   "name": "Govee (gv2mqtt)",
   "mqttUrl": "mqtt://mosquitto:1883",
-  "autoDiscover": true,
-  "excludedDeviceIds": ["AABBCC1122334455"]
+  "autoDiscover": true
 }
 ```
 
 Every Govee device gv2mqtt reports gets exposed automatically (name pulled
 from its Home Assistant discovery config, same source as the effect list),
-so you don't need to know/type any `deviceId` up front. Two ways to opt a
-specific device out:
+so you don't need to know/type any `deviceId` up front. Each newly-found
+device is **also written into this platform's `devices[]` array in
+config.json**, exactly as if you'd added it by hand - open Config UI X's
+settings form afterwards and it's right there with its name and device ID,
+same as anything you typed in yourself.
 
-- **`excludedDeviceIds`**: a hard block, e.g. a lamp you'd rather keep on a
-  different plugin/app, or don't want in HomeKit at all.
-- **Explicit `devices[]` entries still work alongside `autoDiscover`** — for
-  a `deviceId` that's also in `devices[]`, that entry's settings (name,
-  `minMireds`, `enableEffects`, etc.) win instead of the auto-discovered
-  defaults; it doesn't get double-registered.
+Two ways an already-known device stops getting (re-)exposed:
+
+- **Untick its `enabled` checkbox** on its `devices[]` entry (in Config UI X
+  or directly in config.json). It stays in the list - so auto-discovery
+  won't re-add it as "new" - but no accessories get created for it.
+- **Explicit `devices[]` entries take precedence over auto-discovery** for
+  that `deviceId` in general - if you'd already listed a device by hand
+  before turning `autoDiscover` on, its settings (name, `minMireds`,
+  `enableEffects`, etc.) are used as-is and it's never treated as "newly
+  found."
 
 Without `autoDiscover`, `devices[]` is the only source of truth (an allowlist
 — nothing shows up in HomeKit unless it's listed), which is the safer default
@@ -140,6 +146,14 @@ which (like the effect list and state refresh) depends on
 `refreshStateOnConnect`/`periodicRefreshIntervalMs` below — a device added to
 your Govee account won't show up in HomeKit until the next birth-topic ping
 after gv2mqtt itself has learned about it.
+
+Writing to `devices[]` in config.json from a running platform isn't an
+officially supported thing for a regular (non-Custom-UI) Homebridge plugin to
+do - it re-reads and re-writes the whole file defensively, but formatting/
+comments in the original file aren't preserved, and there's a small window
+where an edit made through Config UI X at the exact same moment could get
+lost. If the write fails for any reason (permissions, etc.) the device still
+works for that session - it'll just need rediscovering on the next restart.
 
 ### Migrating from the old config
 
@@ -177,8 +191,8 @@ directly from the original topics.
   Govee account's DIY scenes for the device, and republishes the combined
   list as the `effect_list` field of its Home Assistant MQTT discovery config
   for the light entity. This plugin subscribes to that discovery config topic
-  (`<haDiscoveryPrefix>/light/<deviceId>/gv2mqtt-<deviceId>/config`) and uses
-  its `effect_list` to build the Effects accessory's inputs, instead of a
+  (`<haDiscoveryPrefix>/light/gv2mqtt-<deviceId>/config`) and uses its
+  `effect_list` to build the Effects accessory's inputs, instead of a
   hard-coded list. **Music modes are part of that same API response** (gv2mqtt
   internally tags them with a `Music: ` prefix before handing them to the
   device) - no manual discovery/sniffing step is needed for them. The only

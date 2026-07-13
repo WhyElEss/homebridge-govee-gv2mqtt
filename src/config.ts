@@ -3,6 +3,8 @@ import { PlatformConfig } from 'homebridge';
 export interface DeviceConfig {
   name: string;
   deviceId: string;
+  /** Default true. Set false to keep a known device out of HomeKit without removing its entry. */
+  enabled?: boolean;
   minMireds?: number;
   maxMireds?: number;
   adaptiveLighting?: boolean;
@@ -24,13 +26,13 @@ export interface GoveePlatformConfig extends PlatformConfig {
   haDiscoveryPrefix?: string;
   periodicRefreshIntervalMs?: number;
   autoDiscover?: boolean;
-  excludedDeviceIds?: string[];
   devices?: DeviceConfig[];
 }
 
 export interface ResolvedDeviceConfig {
   name: string;
   deviceId: string;
+  enabled: boolean;
   minMireds: number;
   maxMireds: number;
   adaptiveLighting: boolean;
@@ -51,6 +53,7 @@ export function resolveDeviceConfig(
   return {
     name: device.name,
     deviceId: device.deviceId,
+    enabled: device.enabled ?? true,
     minMireds: device.minMireds ?? 111,
     maxMireds: device.maxMireds ?? 500,
     adaptiveLighting: device.adaptiveLighting ?? true,

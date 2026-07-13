@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import {
   API,
   Characteristic,
@@ -55,7 +56,6 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
     const devices = cfg.devices ?? [];
     const autoDiscover = cfg.autoDiscover ?? false;
-    const excludedDeviceIds = new Set(cfg.excludedDeviceIds ?? []);
     if (devices.length === 0 && !autoDiscover) {
       this.log.warn('No devices configured and autoDiscover is off; nothing to expose.');
     }
@@ -114,19 +114,17 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     };
 
     for (const deviceCfg of devices) {
-      if (excludedDeviceIds.has(deviceCfg.deviceId)) {
-        this.log.warn(
-          `"${deviceCfg.name}" (${deviceCfg.deviceId}) is both listed in devices and in excludedDeviceIds; excluding it.`,
-        );
+      const resolved = resolveDeviceConfig(deviceCfg, topicPrefix, haDiscoveryPrefix);
+      this.knownDeviceIds.add(deviceCfg.deviceId);
+      if (!resolved.enabled) {
+        this.log.info(`"${resolved.name}" (${resolved.deviceId}) is disabled; not exposing it.`);
         continue;
       }
-      const resolved = resolveDeviceConfig(deviceCfg, topicPrefix, haDiscoveryPrefix);
       this.registerDevice(resolved, optimisticCacheMs);
-      this.knownDeviceIds.add(deviceCfg.deviceId);
     }
 
     if (autoDiscover) {
-      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, excludedDeviceIds, scheduleFollowUpPing);
+      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, scheduleFollowUpPing);
     }
 
     // With autoDiscover, newly-found devices only show up asynchronously as
@@ -154,12 +152,16 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
    * these are sub-entities of a device already covered by its main config,
    * not separate physical devices, and are skipped (real device IDs are
    * plain hex with no hyphen, so a trailing "-<digits>" is unambiguous).
+   *
+   * Newly-found devices are both registered in-memory and persisted into
+   * this platform's `devices` array in config.json, so they show up in
+   * Config UI X's normal settings form exactly as if added by hand - from
+   * then on they're "explicit" and autoDiscover leaves them alone.
    */
   private setupAutoDiscovery(
     topicPrefix: string,
     haDiscoveryPrefix: string,
     optimisticCacheMs: number,
-    excludedDeviceIds: Set<string>,
     scheduleFollowUpPing: () => void,
   ): void {
     const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/gv2mqtt-([^/]+)/config$`);
@@ -177,10 +179,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         return;
       }
       const deviceId = match[1];
-      if (segmentSuffix.test(deviceId)) {
-        return;
-      }
-      if (excludedDeviceIds.has(deviceId) || this.knownDeviceIds.has(deviceId)) {
+      if (segmentSuffix.test(deviceId) || this.knownDeviceIds.has(deviceId)) {
         return;
       }
 
@@ -192,12 +191,60 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         // Fall back to the raw device ID as the display name.
       }
 
-      this.log.info(`autoDiscover: found new device "${name}" (${deviceId})`);
+      this.log.info(`autoDiscover: found new device "${name}" (${deviceId}), adding it to devices[] in config.json`);
       const resolved = resolveDeviceConfig({ deviceId, name }, topicPrefix, haDiscoveryPrefix);
       this.registerDevice(resolved, optimisticCacheMs);
       this.knownDeviceIds.add(deviceId);
+      this.persistDiscoveredDevice(deviceId, name);
       scheduleFollowUpPing();
     });
+  }
+
+  /**
+   * Appends a newly auto-discovered device to this platform's `devices`
+   * array directly in config.json, so it appears in Config UI X's normal
+   * settings form (name, deviceId, an Enabled checkbox, etc) exactly as if
+   * the user had added it by hand. Not an officially supported way for a
+   * platform to persist config - Homebridge only guarantees that for a real
+   * Custom Plugin UI - so this re-reads and re-writes the whole file
+   * defensively (skips if the device is already there) rather than caching
+   * any in-memory copy, to minimize the window for clobbering a concurrent
+   * edit made through Config UI X. Formatting/comments in the original file
+   * are not preserved since the whole file is re-serialized.
+   */
+  private persistDiscoveredDevice(deviceId: string, name: string): void {
+    const configPath = this.api.user.configPath();
+    try {
+      const raw = fs.readFileSync(configPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      const platforms: Record<string, unknown>[] = Array.isArray(parsed.platforms) ? parsed.platforms : [];
+      const platformEntry = platforms.find(
+        (p) => p.platform === PLATFORM_NAME && (this.config.name === undefined || p.name === this.config.name),
+      );
+      if (!platformEntry) {
+        this.log.warn(`autoDiscover: could not find this platform's block in ${configPath} to persist "${name}"`);
+        return;
+      }
+
+      const entryDevices: DeviceConfig[] = Array.isArray(platformEntry.devices)
+        ? (platformEntry.devices as DeviceConfig[])
+        : [];
+      if (entryDevices.some((d) => d.deviceId === deviceId)) {
+        return;
+      }
+      entryDevices.push({ name, deviceId });
+      platformEntry.devices = entryDevices;
+
+      const tmpPath = `${configPath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(parsed, null, 4));
+      fs.renameSync(tmpPath, configPath);
+      this.log.info(`autoDiscover: saved "${name}" (${deviceId}) to config.json`);
+    } catch (err) {
+      this.log.warn(
+        `autoDiscover: failed to persist "${name}" (${deviceId}) to config.json: ${(err as Error).message}. ` +
+          'It will still work this session, but will need rediscovering next restart.',
+      );
+    }
   }
 
   private registerDevice(resolved: ResolvedDeviceConfig, optimisticCacheMs: number): void {
@@ -247,9 +294,12 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
 
     const expectedUuids = new Set<string>();
     for (const id of this.knownDeviceIds) {
+      const cfg = deviceConfigById.get(id);
+      if (cfg && cfg.enabled === false) {
+        continue;
+      }
       expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-light`));
-      const enableEffects = deviceConfigById.get(id)?.enableEffects ?? true;
-      if (enableEffects) {
+      if (cfg?.enableEffects ?? true) {
         expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-effects`));
       }
     }

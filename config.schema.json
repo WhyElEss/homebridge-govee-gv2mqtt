@@ -75,21 +75,12 @@
         "title": "Auto-Discover Devices",
         "type": "boolean",
         "default": false,
-        "description": "Automatically expose every Govee device gv2mqtt reports, instead of only the ones listed below. Devices can still be listed below anyway to override their settings (name, mireds range, etc). Use \"Excluded Device IDs\" to keep specific devices out of HomeKit."
-      },
-      "excludedDeviceIds": {
-        "title": "Excluded Device IDs",
-        "type": "array",
-        "items": {
-          "type": "string",
-          "title": "Device ID"
-        },
-        "description": "Device IDs to never expose to HomeKit, whether they'd otherwise come from Auto-Discover Devices or from the list below - e.g. a lamp you'd rather control with a different plugin/app."
+        "description": "Automatically expose every Govee device gv2mqtt reports. Each newly-found device gets saved into the \"Devices\" list below (as if you'd added it by hand), so you can see it there and untick \"Enabled\" on any device you don't want in HomeKit."
       },
       "devices": {
         "title": "Devices",
         "type": "array",
-        "description": "Required if Auto-Discover Devices is off. If it's on, entries here override settings for that specific device ID instead of adding a new one.",
+        "description": "Required if Auto-Discover Devices is off. If it's on, this fills up automatically as devices are found - entries here just take precedence over what auto-discovery would otherwise use.",
         "items": {
           "type": "object",
           "properties": {
@@ -104,6 +95,12 @@
               "type": "string",
               "required": true,
               "description": "The device identifier used in the MQTT topic, e.g. 18DFD0C806467677"
+            },
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean",
+              "default": true,
+              "description": "Untick to keep this device out of HomeKit without deleting it from the list (auto-discovery won't re-add it)."
             },
             "minMireds": {
               "title": "Min Color Temperature (mireds)",
@@ -160,18 +157,12 @@
     "periodicRefreshIntervalMs",
     "autoDiscover",
     {
-      "key": "excludedDeviceIds",
-      "type": "array",
-      "items": [
-        "excludedDeviceIds[]"
-      ]
-    },
-    {
       "key": "devices",
       "type": "array",
       "items": [
         "devices[].name",
         "devices[].deviceId",
+        "devices[].enabled",
         "devices[].minMireds",
         "devices[].maxMireds",
         "devices[].adaptiveLighting",
