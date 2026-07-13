@@ -347,18 +347,22 @@ export class GoveeDevice extends EventEmitter {
       this.state.mode = 'effect';
       this.publish({ state: 'ON', effect: name });
       // Govee's own cloud API appears to be able to race an effect/scene
-      // command against an unrelated color-temperature command issued a few
-      // seconds earlier (e.g. Adaptive Lighting's periodic nudge), settling
-      // on plain color mode a few seconds later even though the effect
-      // command was published last. Re-assert it once more shortly after,
-      // if nothing has since changed the selection, to win that race.
+      // command against an unrelated color-temperature command issued
+      // several seconds earlier (e.g. Adaptive Lighting's periodic nudge),
+      // settling on plain color mode several seconds later even though the
+      // effect command was published last - observed settling as late as
+      // ~5s after the effect command in practice. Re-assert it a few times
+      // over a wider window, if nothing has since changed the selection, to
+      // win that race regardless of exactly how long it takes to resolve.
       const reassertIndex = index;
-      setTimeout(() => {
-        if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
-          this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" to guard against a server-side race`);
-          this.publish({ state: 'ON', effect: name });
-        }
-      }, 3000);
+      for (const delayMs of [2000, 5000, 10000]) {
+        setTimeout(() => {
+          if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
+            this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" (+${delayMs}ms) to guard against a server-side race`);
+            this.publish({ state: 'ON', effect: name });
+          }
+        }, delayMs);
+      }
     }
     this.emit('change', this.getState());
   }
