@@ -130,7 +130,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
    * user having to list every deviceId by hand. The regex both extracts the
    * device ID from the topic and filters out unrelated MQTT lights that
    * might share the same broker/discovery prefix but weren't published by
-   * gv2mqtt (their unique_id won't match "gv2mqtt-<same id>").
+   * gv2mqtt (their unique_id won't match "gv2mqtt-<id>").
    */
   private setupAutoDiscovery(
     topicPrefix: string,
@@ -138,9 +138,9 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     optimisticCacheMs: number,
     excludedDeviceIds: Set<string>,
   ): void {
-    const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/([^/]+)/gv2mqtt-\\1/config$`);
+    const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/gv2mqtt-([^/]+)/config$`);
 
-    this.client!.subscribe(`${haDiscoveryPrefix}/light/+/+/config`, (err) => {
+    this.client!.subscribe(`${haDiscoveryPrefix}/light/+/config`, (err) => {
       if (err) {
         this.log.warn(`autoDiscover: failed to subscribe for new devices: ${err.message}`);
       }

@@ -63,6 +63,9 @@ export function resolveDeviceConfig(
     // gv2mqtt's Home Assistant MQTT discovery config topic for this device's
     // light entity; its "effect_list" field is the real per-device scene/
     // music/DIY effect list fetched from Govee's own API. See GoveeDevice.
-    discoveryConfigTopic: `${haDiscoveryPrefix}/light/${device.deviceId}/gv2mqtt-${device.deviceId}/config`,
+    // Topic is literally "{disco_prefix}/{integration}/{unique_id}/config"
+    // (gv2mqtt's own publish_entity_config), and the light's unique_id is
+    // "gv2mqtt-{deviceId}" - three segments before "config", not four.
+    discoveryConfigTopic: `${haDiscoveryPrefix}/light/gv2mqtt-${device.deviceId}/config`,
   };
 }
