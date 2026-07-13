@@ -49,12 +49,3 @@ export function buildEffectNames(discovered: string[] | null): string[] {
   const effects = discovered && discovered.length > 0 ? discovered : FALLBACK_EFFECT_NAMES;
   return [NORMAL_LIGHT, ...effects];
 }
-
-/**
- * Effect indices are 1-based to match the HomeKit television "Input"
- * identifiers (value 1 = "Normal Light", i.e. no effect).
- */
-export function effectIndexByName(effectNames: string[], name: string, fallback = 1): number {
-  const i = effectNames.indexOf(name);
-  return i === -1 ? fallback : i + 1;
-}

@@ -107,8 +107,8 @@ export class EffectsAccessory {
       }
     }
 
-    names.forEach((name, i) => {
-      const identifier = i + 1;
+    names.forEach((name) => {
+      const identifier = this.device.identifierForName(name);
       const subtype = `effect-${slugify(name)}`;
       const input =
         this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, name, subtype);
@@ -126,8 +126,9 @@ export class EffectsAccessory {
     // Home (and other HomeKit controllers) don't reliably fall back to service
     // creation order for the Inputs list; without an explicit DisplayOrder they
     // can show inputs in an arbitrary order even though Identifier->name mapping
-    // stays correct.
-    const order = names.map((_, i) => i + 1);
+    // stays correct. This is purely a *display* order and can freely differ
+    // from the (stable) Identifier values themselves.
+    const order = names.map((name) => this.device.identifierForName(name));
     this.service.updateCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
 
     this.appliedEffectNames = namesIn;

@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { Logger } from 'homebridge';
 import { MqttClient } from 'mqtt';
 import { ResolvedDeviceConfig } from './config';
-import { buildEffectNames, effectIndexByName } from './effects';
+import { buildEffectNames, NORMAL_LIGHT } from './effects';
 import { hueSatToRgb, rgbToHueSat } from './color';
 
 export type GoveeColorMode = 'adaptive' | 'rgb' | 'effect';
@@ -55,6 +55,21 @@ export class GoveeDevice extends EventEmitter {
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
   private hueSatFlushTimer?: NodeJS.Timeout;
 
+  /**
+   * Stable name<->identifier mapping, shared by this device's own effectIndex
+   * bookkeeping and by EffectsAccessory's InputSource Identifier values, so
+   * both agree on what a given number means. An identifier is assigned once,
+   * the first time its name is seen, and never reassigned - Govee's API
+   * doesn't guarantee effect_list order stays the same between discovery
+   * refreshes, and reassigning identifiers by array position on every
+   * refresh let the same number silently point at a different effect,
+   * desyncing Home's own Input cache (entries could vanish from its UI even
+   * though the underlying InputSource services were all present and
+   * correct).
+   */
+  private readonly identifierByName = new Map<string, number>();
+  private readonly nameByIdentifier = new Map<number, string>();
+
   constructor(
     private readonly client: MqttClient,
     public readonly config: ResolvedDeviceConfig,
@@ -62,6 +77,8 @@ export class GoveeDevice extends EventEmitter {
     private readonly log: Logger,
   ) {
     super();
+
+    this.identifierForName(NORMAL_LIGHT); // guarantee it's always identifier 1
 
     this.client.subscribe(config.stateTopic, (err) => {
       if (err) {
@@ -91,6 +108,22 @@ export class GoveeDevice extends EventEmitter {
 
   getState(): GoveeDeviceState {
     return { ...this.state };
+  }
+
+  /** Looks up (assigning on first use) the stable 1-based identifier for an effect name. */
+  identifierForName(name: string): number {
+    let id = this.identifierByName.get(name);
+    if (id === undefined) {
+      id = this.identifierByName.size + 1;
+      this.identifierByName.set(name, id);
+      this.nameByIdentifier.set(id, name);
+    }
+    return id;
+  }
+
+  /** Reverse of identifierForName; undefined if that identifier hasn't been assigned yet. */
+  nameForIdentifier(id: number): string | undefined {
+    return this.nameByIdentifier.get(id);
   }
 
   private withinOptimisticWindow(): boolean {
@@ -132,7 +165,7 @@ export class GoveeDevice extends EventEmitter {
     if (this.state.isOn && !this.withinOptimisticWindow()) {
       if (msg.effect) {
         this.state.mode = 'effect';
-        this.state.effectIndex = effectIndexByName(this.state.effectNames, msg.effect, this.state.effectIndex);
+        this.state.effectIndex = this.identifierForName(msg.effect);
       } else {
         this.state.mode = msg.color_mode === 'rgb' ? 'rgb' : 'adaptive';
         this.state.effectIndex = 1;
@@ -189,6 +222,9 @@ export class GoveeDevice extends EventEmitter {
     }
 
     this.state.effectNames = buildEffectNames(names);
+    for (const effectName of this.state.effectNames) {
+      this.identifierForName(effectName);
+    }
     this.log.info(`[${this.config.name}] Discovered ${names.length} real effect(s) from gv2mqtt`);
     this.emit('change', this.getState());
   }
@@ -328,7 +364,7 @@ export class GoveeDevice extends EventEmitter {
   }
 
   setEffectIndex(index: number): void {
-    const name = this.state.effectNames[index - 1];
+    const name = index <= 1 ? NORMAL_LIGHT : this.nameForIdentifier(index);
     this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
     this.markLocalChange();
     // HomeKit doesn't guarantee whether Active or ActiveIdentifier arrives
