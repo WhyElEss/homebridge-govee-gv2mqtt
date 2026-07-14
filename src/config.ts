@@ -12,6 +12,18 @@ export interface DeviceConfig {
   colorSaturationThreshold?: number;
   turnOffOnStartup?: boolean;
   turnOffOnStartupDelayMs?: number;
+  /**
+   * Exposes a "<name> Alert" switch: turning it on captures a snapshot of
+   * whatever the light is currently doing (including an active effect) and
+   * forces it to alertHue/alertSaturation/alertBrightness; turning it off
+   * restores the snapshot exactly. Meant for automations like "flash red
+   * while the front door is open, then go back to whatever it was doing" -
+   * see README.
+   */
+  enableAlert?: boolean;
+  alertHue?: number;
+  alertSaturation?: number;
+  alertBrightness?: number;
 }
 
 export interface GoveePlatformConfig extends PlatformConfig {
@@ -40,6 +52,10 @@ export interface ResolvedDeviceConfig {
   colorSaturationThreshold: number;
   turnOffOnStartup: boolean;
   turnOffOnStartupDelayMs: number;
+  enableAlert: boolean;
+  alertHue: number;
+  alertSaturation: number;
+  alertBrightness: number;
   stateTopic: string;
   commandTopic: string;
   discoveryConfigTopic: string;
@@ -61,6 +77,10 @@ export function resolveDeviceConfig(
     colorSaturationThreshold: device.colorSaturationThreshold ?? 0.75,
     turnOffOnStartup: device.turnOffOnStartup ?? false,
     turnOffOnStartupDelayMs: device.turnOffOnStartupDelayMs ?? 10000,
+    enableAlert: device.enableAlert ?? false,
+    alertHue: device.alertHue ?? 0,
+    alertSaturation: device.alertSaturation ?? 100,
+    alertBrightness: device.alertBrightness ?? 100,
     stateTopic: `${topicPrefix}/${device.deviceId}/state`,
     commandTopic: `${topicPrefix}/${device.deviceId}/command`,
     // gv2mqtt's Home Assistant MQTT discovery config topic for this device's

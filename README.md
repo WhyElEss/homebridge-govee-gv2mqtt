@@ -39,6 +39,9 @@ For every known device the platform creates:
   be triggered manually from the Home app or wired into HomeKit automations
   — something the stock Govee HomeKit integration doesn't expose at all.
   This accessory can be disabled per-device with `enableEffects: false`.
+- **`<name> Alert`** — an optional Switch accessory (`enableAlert: true`) for
+  "flash this light, then put it back exactly how it was" automations. See
+  [Alert switch](#alert-switch-flash-and-restore-for-automations) below.
 
 Both accessories for a device share one `GoveeDevice` instance
 ([src/govee-device.ts](src/govee-device.ts)) that owns all MQTT
@@ -150,6 +153,53 @@ and there's a small window where an edit made through Config UI X at the
 exact same moment could get lost. If the write fails for any reason
 (permissions, etc.) the device still works for that session — it'll just
 need rediscovering on the next restart.
+
+## Alert switch: flash-and-restore for automations
+
+Set `enableAlert: true` on a device to get an extra `<name> Alert` Switch
+accessory, for automations like *"turn the lamp red while the front door is
+open, then put it back to whatever it was doing"* — including back into an
+active effect, not just its last plain color.
+
+- Turning the switch **on** snapshots the light's full current state (power,
+  effect selection, or color/color-temperature + brightness, whichever mode
+  it's actually in) and forces it to a fixed alert color.
+- Turning the switch **off** restores exactly what was snapshotted — if the
+  light was mid-effect, it goes back into that same effect; if it was off,
+  it goes back off; if it was on a plain color or color temperature, that's
+  reapplied.
+- The alert color is configurable per device: `alertHue` (0-360),
+  `alertSaturation` (0-100), `alertBrightness` (0-100) — default is full
+  red (`0, 100, 100`).
+
+```json
+{
+  "name": "Govee Table Lamp",
+  "deviceId": "18DFD0C806467677",
+  "enableAlert": true,
+  "alertHue": 0,
+  "alertSaturation": 100,
+  "alertBrightness": 100
+}
+```
+
+This is deliberately a single on/off toggle rather than a multi-step "do
+this, wait, then do that" automation. HomeKit's own Home app has no native
+"snapshot current state and restore it later" primitive, and no explicit
+"wait" step between actions in an automation (that exists only via
+Shortcuts' "Convert to Shortcut", and Shortcuts' Personal Automations run
+tied to a specific phone/Apple ID — unreliable if that phone isn't home or
+is asleep). A plain two-trigger Home app automation doesn't have that
+problem: any Home Hub (Apple TV, HomePod, or a always-on iPad) can run it
+regardless of which phones are present. So the pattern is two ordinary,
+single-action Home app automations built on a door/contact sensor:
+
+- **Door opens** → turn on `<name> Alert`.
+- **Door closes** → turn off `<name> Alert`.
+
+Each automation only ever does one thing (flip one switch), so there's
+nothing to sequence or wait on — the snapshot/restore logic all happens
+inside the plugin the moment the switch is toggled.
 
 ## Behavior notes
 

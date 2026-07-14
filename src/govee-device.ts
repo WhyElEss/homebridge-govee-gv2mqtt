@@ -18,6 +18,18 @@ export interface GoveeDeviceState {
   effectIndex: number;
   /** Index 0 is always "Normal Light"; see buildEffectNames. */
   effectNames: string[];
+  /** Whether triggerAlert() has been called without a matching restoreSnapshot() yet. */
+  alertActive: boolean;
+}
+
+interface StateSnapshot {
+  isOn: boolean;
+  mode: GoveeColorMode;
+  mireds: number;
+  hue: number;
+  saturation: number;
+  brightness: number;
+  effectIndex: number;
 }
 
 interface IncomingMessage {
@@ -42,6 +54,7 @@ const DEFAULT_STATE: GoveeDeviceState = {
   mode: 'adaptive',
   effectIndex: 1,
   effectNames: buildEffectNames(null),
+  alertActive: false,
 };
 
 /**
@@ -55,6 +68,7 @@ export class GoveeDevice extends EventEmitter {
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
   private hueSatFlushTimer?: NodeJS.Timeout;
   private effectReassertTimer?: NodeJS.Timeout;
+  private snapshot: StateSnapshot | null = null;
 
   /**
    * Stable name<->identifier mapping, shared by this device's own effectIndex
@@ -405,6 +419,76 @@ export class GoveeDevice extends EventEmitter {
         }
       }, 5000);
     }
+    this.emit('change', this.getState());
+  }
+
+  /**
+   * Forces the light to a fixed alert color, first snapshotting whatever it
+   * was doing (including an active effect) so restoreSnapshot() can put it
+   * back exactly. Meant to be driven by AlertAccessory's Switch - see
+   * README's door-sensor example. Always sent as a true RGB color (not run
+   * through the white/color-temperature heuristic used for Home's color
+   * wheel), since an alert color is a deliberate, explicit choice.
+   */
+  triggerAlert(hue: number, saturation: number, brightness: number): void {
+    this.snapshot = {
+      isOn: this.state.isOn,
+      mode: this.state.mode,
+      mireds: this.state.mireds,
+      hue: this.state.hue,
+      saturation: this.state.saturation,
+      brightness: this.state.brightness,
+      effectIndex: this.state.effectIndex,
+    };
+    this.log.debug(`[${this.config.name}] Captured snapshot before alert: ${JSON.stringify(this.snapshot)}`);
+
+    this.markLocalChange();
+    this.state.isOn = true;
+    this.state.mode = 'rgb';
+    this.state.hue = hue;
+    this.state.saturation = saturation;
+    this.state.brightness = brightness;
+    this.state.alertActive = true;
+
+    const { r, g, b } = hueSatToRgb(hue, saturation, brightness);
+    this.publish({ state: 'ON', color: { r, g, b }, brightness });
+    this.emit('change', this.getState());
+  }
+
+  /** Reverses triggerAlert(), reapplying whatever was captured - including a specific effect. */
+  restoreSnapshot(): void {
+    const snap = this.snapshot;
+    this.snapshot = null;
+    this.state.alertActive = false;
+
+    if (!snap) {
+      this.log.warn(`[${this.config.name}] restoreSnapshot() called with no prior snapshot; leaving state as-is.`);
+      this.emit('change', this.getState());
+      return;
+    }
+
+    this.markLocalChange();
+    this.state.isOn = snap.isOn;
+    this.state.mode = snap.mode;
+    this.state.mireds = snap.mireds;
+    this.state.hue = snap.hue;
+    this.state.saturation = snap.saturation;
+    this.state.brightness = snap.brightness;
+    this.state.effectIndex = snap.effectIndex;
+
+    if (!snap.isOn) {
+      this.publish({ state: 'OFF' });
+    } else if (snap.mode === 'effect') {
+      const name = this.nameForIdentifier(snap.effectIndex) ?? NORMAL_LIGHT;
+      this.publish({ state: 'ON', effect: name });
+    } else if (snap.mode === 'rgb') {
+      const { r, g, b } = hueSatToRgb(snap.hue, snap.saturation, snap.brightness);
+      this.publish({ state: 'ON', color: { r, g, b }, brightness: snap.brightness });
+    } else {
+      this.publish({ state: 'ON', color_temp: snap.mireds, brightness: snap.brightness });
+    }
+
+    this.log.debug(`[${this.config.name}] Restored snapshot: ${JSON.stringify(snap)}`);
     this.emit('change', this.getState());
   }
 }

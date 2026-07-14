@@ -14,6 +14,7 @@ import { DeviceConfig, GoveePlatformConfig, resolveDeviceConfig, ResolvedDeviceC
 import { GoveeDevice } from './govee-device';
 import { LightAccessory } from './light-accessory';
 import { EffectsAccessory } from './effects-accessory';
+import { AlertAccessory } from './alert-accessory';
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -265,6 +266,15 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         (accessory) => new EffectsAccessory(this, accessory, device),
       );
     }
+
+    if (resolved.enableAlert) {
+      this.addOrRestoreAccessory(
+        `${resolved.deviceId}-alert`,
+        `${resolved.name} Alert`,
+        this.api.hap.Categories.SWITCH,
+        (accessory) => new AlertAccessory(this, accessory, device),
+      );
+    }
   }
 
   private addOrRestoreAccessory(
@@ -301,6 +311,9 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-light`));
       if (cfg?.enableEffects ?? true) {
         expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-effects`));
+      }
+      if (cfg?.enableAlert ?? false) {
+        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-alert`));
       }
     }
 

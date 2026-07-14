@@ -137,6 +137,33 @@
               "title": "Startup Off Delay (ms)",
               "type": "integer",
               "default": 10000
+            },
+            "enableAlert": {
+              "title": "Expose Alert Switch",
+              "type": "boolean",
+              "default": false,
+              "description": "Adds a \"<name> Alert\" switch: turning it on snapshots the light's current state (including an active effect) and forces the alert color below; turning it off restores exactly what was snapshotted. For automations like \"flash red while the front door is open\" without a multi-step automation - see README."
+            },
+            "alertHue": {
+              "title": "Alert Hue (0-360)",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 360
+            },
+            "alertSaturation": {
+              "title": "Alert Saturation (0-100)",
+              "type": "integer",
+              "default": 100,
+              "minimum": 0,
+              "maximum": 100
+            },
+            "alertBrightness": {
+              "title": "Alert Brightness (0-100)",
+              "type": "integer",
+              "default": 100,
+              "minimum": 0,
+              "maximum": 100
             }
           }
         }
@@ -169,7 +196,11 @@
         "devices[].enableEffects",
         "devices[].colorSaturationThreshold",
         "devices[].turnOffOnStartup",
-        "devices[].turnOffOnStartupDelayMs"
+        "devices[].turnOffOnStartupDelayMs",
+        "devices[].enableAlert",
+        "devices[].alertHue",
+        "devices[].alertSaturation",
+        "devices[].alertBrightness"
       ]
     }
   ]
