@@ -258,6 +258,86 @@ export function stormScenePackets(): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// LAN discovery
+// ---------------------------------------------------------------------------
+
+const MULTICAST_ADDR = '239.255.255.250';
+const SCAN_PORT = 4001;
+/** Govee devices always send scan replies to UDP 4002 of the requesting host. */
+const RESPONSE_PORT = 4002;
+/** How long to keep port 4002 open collecting scan replies. */
+const SCAN_WINDOW_MS = 1500;
+/** Don't re-scan more often than this when refreshes are requested back-to-back. */
+const SCAN_MIN_INTERVAL_MS = 30000;
+
+/** Config deviceId "18DFD0C806467677" and scan-reply device "18:DF:D0:C8:06:46:76:77" both normalize to the former. */
+function normalizeDeviceId(id: string): string {
+  return id.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+}
+
+let inflightScan: Promise<Map<string, string>> | null = null;
+
+/**
+ * One multicast LAN scan, shared by all lamps: binds UDP 4002, multicasts a
+ * scan request, and collects replies for SCAN_WINDOW_MS. Resolves to a map
+ * of normalized device ID -> IP (empty on failure - notably when 4002 is
+ * already taken by another Govee LAN controller on this host, e.g. a
+ * host-networked govee2mqtt; callers then fall back to a configured lanIp).
+ * The port is only held for the scan window, never permanently. Concurrent
+ * callers share one in-flight scan rather than fighting over the port.
+ */
+export function scanLanDevices(log: Logger): Promise<Map<string, string>> {
+  if (inflightScan) {
+    return inflightScan;
+  }
+  const scan = new Promise<Map<string, string>>((resolve) => {
+    const found = new Map<string, string>();
+    const socket = dgram.createSocket('udp4');
+    let done = false;
+    const finish = () => {
+      if (done) {
+        return;
+      }
+      done = true;
+      inflightScan = null;
+      try {
+        socket.close();
+      } catch {
+        // Already closed (e.g. finishing from the error handler).
+      }
+      resolve(found);
+    };
+
+    socket.on('error', (err) => {
+      log.warn(`Govee LAN scan unavailable (${err.message}); will fall back to configured lanIp if set`);
+      finish();
+    });
+    socket.on('message', (buf) => {
+      try {
+        const msg = JSON.parse(buf.toString()).msg;
+        if (msg?.cmd === 'scan' && typeof msg.data?.ip === 'string' && typeof msg.data?.device === 'string') {
+          found.set(normalizeDeviceId(msg.data.device), msg.data.ip);
+        }
+      } catch {
+        // Not a scan reply; ignore.
+      }
+    });
+    socket.bind(RESPONSE_PORT, () => {
+      const req = Buffer.from(JSON.stringify({ msg: { cmd: 'scan', data: { account_topic: 'reserve' } } }));
+      socket.send(req, SCAN_PORT, MULTICAST_ADDR, (err) => {
+        if (err) {
+          log.warn(`Govee LAN scan request failed: ${err.message}`);
+          finish();
+        }
+      });
+      setTimeout(finish, SCAN_WINDOW_MS);
+    });
+  });
+  inflightScan = scan;
+  return scan;
+}
+
+// ---------------------------------------------------------------------------
 // LAN transport
 // ---------------------------------------------------------------------------
 
@@ -265,18 +345,78 @@ export function stormScenePackets(): string[] {
  * Fire-and-forget UDP sender for one lamp. The LAN API has no delivery
  * acknowledgment for control commands, so errors are only logged; state
  * verification stays with gv2mqtt's normal reporting path.
+ *
+ * The lamp's IP is auto-discovered via scanLanDevices (matched by device
+ * ID), cached, and refreshed in the background around each activation; a
+ * configured lanIp is only a fallback for when scanning isn't possible.
+ * Commands resolve the target at send time, so a long-running strobe picks
+ * up a refreshed IP mid-effect.
  */
 export class H6022Lan {
   private socket?: dgram.Socket;
   private strobeTimer?: NodeJS.Timeout;
+  private discoveredIp: string | null = null;
+  private lastScanAt = 0;
+  private readonly deviceId: string;
 
   constructor(
-    private readonly ip: string,
+    deviceId: string,
+    private readonly fallbackIp: string,
     private readonly deviceName: string,
     private readonly log: Logger,
-  ) {}
+  ) {
+    this.deviceId = normalizeDeviceId(deviceId);
+    // Warm the cache so the first activation doesn't have to wait for a scan.
+    void this.refreshIp();
+  }
+
+  private target(): string | null {
+    return this.discoveredIp ?? (this.fallbackIp || null);
+  }
+
+  private async refreshIp(force = false): Promise<void> {
+    // The throttle only applies to opportunistic background refreshes;
+    // a forced refresh (nothing known yet) always scans.
+    if (!force && Date.now() - this.lastScanAt < SCAN_MIN_INTERVAL_MS) {
+      return;
+    }
+    this.lastScanAt = Date.now();
+    const devices = await scanLanDevices(this.log);
+    const ip = devices.get(this.deviceId);
+    if (ip) {
+      if (ip !== this.discoveredIp) {
+        this.log.info(`[${this.deviceName}] LAN scan found the lamp at ${ip}`);
+      }
+      this.discoveredIp = ip;
+    } else if (!this.target()) {
+      this.log.warn(
+        `[${this.deviceName}] LAN scan did not find this lamp and no lanIp is configured; ` +
+          'custom effects cannot be sent. Is LAN Control enabled for it in the Govee Home app?',
+      );
+    }
+  }
+
+  /**
+   * Resolves the IP to use for an activation: an already-known target is
+   * returned immediately (with a background refresh for next time, so a
+   * DHCP-changed address costs at most one missed activation); otherwise
+   * this blocks on a scan. Null when nothing is known even after scanning.
+   */
+  async ensureTarget(): Promise<string | null> {
+    if (this.target()) {
+      void this.refreshIp();
+      return this.target();
+    }
+    await this.refreshIp(true);
+    return this.target();
+  }
 
   private send(msg: Record<string, unknown>): void {
+    const ip = this.target();
+    if (!ip) {
+      this.log.debug(`[${this.deviceName}] dropping LAN command - lamp IP unknown`);
+      return;
+    }
     if (!this.socket) {
       this.socket = dgram.createSocket('udp4');
       this.socket.on('error', (err) => {
@@ -284,9 +424,9 @@ export class H6022Lan {
       });
     }
     const buf = Buffer.from(JSON.stringify({ msg }));
-    this.socket.send(buf, CONTROL_PORT, this.ip, (err) => {
+    this.socket.send(buf, CONTROL_PORT, ip, (err) => {
       if (err) {
-        this.log.warn(`[${this.deviceName}] LAN send to ${this.ip}:${CONTROL_PORT} failed: ${err.message}`);
+        this.log.warn(`[${this.deviceName}] LAN send to ${ip}:${CONTROL_PORT} failed: ${err.message}`);
       }
     });
   }

@@ -163,13 +163,13 @@
               "title": "Expose Custom Effects (H6022 only)",
               "type": "boolean",
               "default": false,
-              "description": "Adds a \"<name> Custom Effects\" accessory with two switches - \"Police Strobo\" and \"Гроза в банке\" - sent to the lamp directly over the local network (not through Govee's cloud). Only works on the Table Lamp 2 (H6022); activation is refused for any other model. Requires \"Lamp LAN IP\" below and the lamp's LAN Control toggle enabled in the Govee Home app (Device Settings)."
+              "description": "Adds a \"<name> Custom Effects\" accessory with two switches - \"Police Strobo\" and \"Гроза в банке\" - sent to the lamp directly over the local network (not through Govee's cloud). Only works on the Table Lamp 2 (H6022); activation is refused for any other model. Requires the lamp's LAN Control toggle enabled in the Govee Home app (Device Settings). The lamp's IP address is discovered automatically."
             },
             "lanIp": {
-              "title": "Lamp LAN IP",
+              "title": "Lamp LAN IP (optional fallback)",
               "type": "string",
-              "placeholder": "192.168.1.50",
-              "description": "The lamp's local IP address, used only by Custom Effects. Give the lamp a DHCP reservation on your router so it doesn't change."
+              "placeholder": "auto-discovered",
+              "description": "Normally leave empty - the lamp is found by a LAN scan. Set only if the scan can't run on your setup (e.g. UDP port 4002 is permanently held by another Govee LAN controller on the same host)."
             }
           }
         }

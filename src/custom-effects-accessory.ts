@@ -33,7 +33,7 @@ export class CustomEffectsAccessory {
   ) {
     const { Service: Svc, Characteristic } = this.platform;
 
-    this.lan = new H6022Lan(device.config.lanIp, device.config.name, platform.log);
+    this.lan = new H6022Lan(device.config.deviceId, device.config.lanIp, device.config.name, platform.log);
 
     accessory
       .getService(Svc.AccessoryInformation)!
@@ -70,9 +70,9 @@ export class CustomEffectsAccessory {
     service
       .getCharacteristic(Characteristic.On)
       .onGet(() => this.device.getState().customEffect === effectName)
-      .onSet((value) => {
+      .onSet(async (value) => {
         if (value) {
-          this.activate(effectName, service, start);
+          await this.activate(effectName, service, start);
         } else if (this.device.getState().customEffect === effectName) {
           this.lan.stop();
           this.device.stopCustomEffect();
@@ -81,7 +81,7 @@ export class CustomEffectsAccessory {
     return service;
   }
 
-  private activate(effectName: string, service: Service, start: () => void): void {
+  private async activate(effectName: string, service: Service, start: () => void): Promise<void> {
     const { sku } = this.device.getState();
     if (sku !== 'H6022') {
       this.platform.log.warn(
@@ -90,12 +90,32 @@ export class CustomEffectsAccessory {
             ? `but gv2mqtt reports this device as ${sku}; not activating.`
             : 'and the device model has not been confirmed by gv2mqtt discovery yet; try again in a few seconds.'),
       );
-      // HomeKit has already assumed the write succeeded; push the real state
-      // back so the switch doesn't stay stuck on.
-      setTimeout(() => service.updateCharacteristic(this.platform.Characteristic.On, false), 100);
+      this.revertSwitch(service);
       return;
     }
+
+    // Usually instant (the IP is discovered at startup and cached); only
+    // blocks on a fresh LAN scan when nothing is known yet.
+    const ip = await this.lan.ensureTarget();
+    if (!ip) {
+      this.platform.log.warn(
+        `[${this.device.config.name}] "${effectName}" not activated: the lamp's IP is unknown ` +
+          '(LAN scan found nothing and no lanIp fallback is configured).',
+      );
+      this.revertSwitch(service);
+      return;
+    }
+
     this.device.startCustomEffect(effectName);
     start();
+  }
+
+  /**
+   * HomeKit assumes a write succeeded the moment onSet returns; when
+   * activation is refused, push the real (off) state back shortly after so
+   * the switch doesn't stay stuck on.
+   */
+  private revertSwitch(service: Service): void {
+    setTimeout(() => service.updateCharacteristic(this.platform.Characteristic.On, false), 100);
   }
 }

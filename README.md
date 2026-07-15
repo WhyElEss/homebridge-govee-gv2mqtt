@@ -47,7 +47,7 @@ For every known device the platform creates:
   "flash this light, then put it back exactly how it was" automations. See
   [Alert switch](#alert-switch-flash-and-restore-for-automations) below.
 - **`<name> Custom Effects`** — an optional accessory
-  (`enableCustomEffects: true` + `lanIp`, **H6022 Table Lamp 2 only**) with
+  (`enableCustomEffects: true`, **H6022 Table Lamp 2 only**) with
   two switches for effects Govee's cloud API can't express, sent to the lamp
   directly over the local network. See
   [Custom effects](#custom-effects-h6022-only-police-strobo--гроза-в-банке)
@@ -213,7 +213,7 @@ inside the plugin the moment the switch is toggled.
 
 ## Custom effects (H6022 only): Police Strobo / Гроза в банке
 
-Set `enableCustomEffects: true` **and** `lanIp` on a device to get a
+Set `enableCustomEffects: true` on a device to get a
 `<name> Custom Effects` accessory with two switches. These effects are
 inspired by the GyverLamp firmware and can't be expressed through
 gv2mqtt/Govee's cloud API, so the plugin sends them straight to the lamp
@@ -245,19 +245,27 @@ Requirements and caveats:
   MQTT discovery confirms the device model is `H6022` (a warning is logged
   otherwise).
 - **LAN Control must be enabled** for the lamp in the Govee Home app
-  (Device Settings → LAN Control), and `lanIp` must be the lamp's local IP —
-  give it a DHCP reservation on your router.
+  (Device Settings → LAN Control).
+- **The lamp's IP is discovered automatically**: the plugin multicasts a
+  Govee LAN scan and matches the reply to the device by its `deviceId`
+  (scan replies carry the same ID, colon-separated). The scan binds UDP
+  port 4002 — where Govee devices always send scan replies — for ~1.5s at
+  startup and around each activation, then releases it; discovered IPs are
+  cached, and a running effect picks up an address change on the fly, so no
+  DHCP reservation is needed. If the port is busy (e.g. a host-networked
+  Govee LAN controller holds it permanently) or the scan finds nothing, the
+  plugin falls back to the optional `lanIp` config value; without either,
+  activation is refused with a warning in the log.
 - The LAN protocol is fire-and-forget UDP: the plugin can't confirm the lamp
   received a command. If a switch turns on but the lamp doesn't react, check
-  LAN Control, the IP address, and that UDP traffic can reach the lamp from
-  the Homebridge container.
+  LAN Control and that UDP traffic can reach the lamp from the Homebridge
+  container.
 
 ```json
 {
   "name": "Govee Table Lamp",
   "deviceId": "18DFD0C806467677",
-  "enableCustomEffects": true,
-  "lanIp": "192.168.2.50"
+  "enableCustomEffects": true
 }
 ```
 

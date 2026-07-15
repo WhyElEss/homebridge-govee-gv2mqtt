@@ -27,11 +27,16 @@ export interface DeviceConfig {
   /**
    * Exposes a "<name> Custom Effects" accessory with LAN-driven effects
    * (Police Strobo, Гроза в банке). H6022 (Table Lamp 2) only - activation
-   * is refused for any other model. Requires lanIp and the lamp's "LAN
-   * Control" toggle enabled in the Govee Home app.
+   * is refused for any other model. Requires the lamp's "LAN Control"
+   * toggle enabled in the Govee Home app. The lamp's IP is auto-discovered
+   * by a multicast LAN scan (matched by deviceId).
    */
   enableCustomEffects?: boolean;
-  /** The lamp's local IP address (give it a DHCP reservation on the router). */
+  /**
+   * Optional fallback IP for the lamp, used only when the LAN scan can't
+   * run - e.g. UDP port 4002 is held by another Govee LAN controller on the
+   * same host. Not needed otherwise; discovery follows DHCP changes.
+   */
   lanIp?: string;
 }
 
