@@ -248,7 +248,13 @@ inside the plugin the moment the switch is toggled.
     needs no further input from the plugin to relight the lamp. Any real
     power-on through HomeKit disarms this watchdog instantly; a genuine
     out-of-band power-on (Govee app, pressing the button back on within
-    that half-minute) can be fought at most 3 times and then wins.
+    that half-minute) can be fought at most 3 times and then wins. The
+    watchdog only ever arms while the lamp is idle in plain
+    color-temperature mode with an AL nudge as the *last command sent* —
+    any deliberate HomeKit command (an effect selection, a color change,
+    an on/off) resets that bookkeeping, so Govee's known spurious-OFF blip
+    after an effect command can't be mistaken for a button press while
+    paging through effects.
   Nudges are also sent without a redundant `brightness` field, halving the
   Govee API calls gv2mqtt makes per nudge.
 - **Real effect list per device** (needs `refreshStateOnConnect`, default

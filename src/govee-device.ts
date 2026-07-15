@@ -216,6 +216,19 @@ export class GoveeDevice extends EventEmitter {
 
   private markLocalChange(): void {
     this.lastLocalSetAt = Date.now();
+    // Every deliberate local command also supersedes the AL-nudge
+    // bookkeeping: lastAlCommandAt must mean "the LAST command we sent was a
+    // background AL nudge", because that's the only context in which the
+    // physical-off watchdog may interpret an "off" report as a button
+    // press. Without this reset, the known spurious OFF blip that Govee's
+    // cloud can emit a few seconds after an effect command was mistaken for
+    // a button press (a stale nudge timestamp from up to a minute earlier
+    // made it look like "off during active AL"), and the watchdog then
+    // fought the user's own effect browsing - killing each newly selected
+    // effect with an OFF and making paging through effects crawl. The AL
+    // publish path re-stamps lastAlCommandAt right after calling this, so
+    // nudges themselves are unaffected.
+    this.lastAlCommandAt = 0;
   }
 
   // The four gv2mqtt command shapes this plugin ever sends. gv2mqtt only
@@ -282,12 +295,13 @@ export class GoveeDevice extends EventEmitter {
   private defendPhysicalOff(reportedOn: boolean): boolean {
     if (!reportedOn) {
       const sinceNudge = Date.now() - this.lastAlCommandAt;
-      if (this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS) {
-        // The device reports "off" while Adaptive Lighting was actively
-        // nudging it - i.e. the light was just powered off out-of-band (its
-        // physical button), not through HomeKit (HomeKit offs go through
-        // setOn, which doesn't touch lastAlCommandAt). Two hazards follow,
-        // both observed with Govee's cloud:
+      if (this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS && this.state.mode === 'adaptive') {
+        // The device reports "off" while the lamp is sitting idle in plain
+        // adaptive mode and the last command we sent was a background AL
+        // nudge (every deliberate HomeKit command resets lastAlCommandAt via
+        // markLocalChange) - i.e. the light was just powered off
+        // out-of-band, by its physical button. Two hazards follow, both
+        // observed with Govee's cloud:
         //
         // 1. A nudge we published moments ago may still be in flight and
         //    wake the lamp back up (gv2mqtt maps color-temp commands onto
