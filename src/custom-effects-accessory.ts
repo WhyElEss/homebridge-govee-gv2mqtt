@@ -61,6 +61,10 @@ export class CustomEffectsAccessory {
     const service =
       this.accessory.getServiceById(Svc.Switch, subtype) ?? this.accessory.addService(Svc.Switch, effectName, subtype);
     service.setCharacteristic(Characteristic.Name, effectName);
+    // ConfiguredName lets the Home app show per-switch names inside the
+    // combined accessory tile; it's not part of HAP's Switch definition, so
+    // declare it as optional first to avoid a HAP-NodeJS warning at startup.
+    service.addOptionalCharacteristic(Characteristic.ConfiguredName);
     service.setCharacteristic(Characteristic.ConfiguredName, effectName);
 
     service
