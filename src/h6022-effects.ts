@@ -85,10 +85,13 @@ function blockHeader(groupsSize: number, numGroups: number): number[] {
 }
 
 /**
- * Builds the raw (pre-base64) scene-param bytes for a multi-layer H6022
- * matrix scene. Blocks get z-order 1..n (block 0 topmost).
+ * Builds the raw (pre-base64) scene-param bytes for a multi-block H6022
+ * matrix scene. In layer mode (default) all blocks render simultaneously
+ * with z-order 1..n (block 0 topmost); in carousel mode the firmware shows
+ * the blocks one after another in a loop, i.e. each block is one animation
+ * frame.
  */
-function buildMatrixSceneParam(blocks: MatrixBlock[]): number[] {
+function buildMatrixSceneParam(blocks: MatrixBlock[], carousel = false): number[] {
   const rendered = blocks.map((blk, i) => {
     const gdata = groupBytes(blk.groups);
     const zOrder = (i + 1) & 0xff;
@@ -99,8 +102,8 @@ function buildMatrixSceneParam(blocks: MatrixBlock[]): number[] {
   const data: number[] = [
     0x41,
     // Main header: background RGB + opacity (kept black/transparent here),
-    // 0x00 = render layers simultaneously (0x01 would be carousel), block count.
-    0x00, 0x00, 0x00, 0x00, 0x00, blocks.length & 0xff,
+    // render mode (0x00 = simultaneous layers, 0x01 = carousel), block count.
+    0x00, 0x00, 0x00, 0x00, carousel ? 0x01 : 0x00, blocks.length & 0xff,
     ...blockHeader(rendered[0].gdata.length, blocks[0].groups.length),
   ];
   rendered.forEach(({ gdata, tail }, i) => {
@@ -161,26 +164,6 @@ function scenePackets(sceneParam: number[]): string[] {
 // Effect definitions
 // ---------------------------------------------------------------------------
 
-/** Milliseconds each red/blue phase of Police Strobo lasts. */
-const STROBE_PHASE_MS = 150;
-const STROBE_RED: [number, number, number] = [255, 0, 0];
-const STROBE_BLUE: [number, number, number] = [0, 0, 255];
-
-/**
- * Solid color as a single BLE-style packet (H6022's 0x33 0x05 0x0d command,
- * from dvdavd/govee-h6022-ble's setColour). Sent via ptReal it applies
- * instantly, unlike the LAN "colorwc" command, which the lamp eases into
- * with a visible fade - far too slow for a strobe.
- */
-function solidColorPacket([r, g, b]: [number, number, number]): string {
-  return Buffer.from(finishPacket([0x33, 0x05, 0x0d, r & 0xff, g & 0xff, b & 0xff, 0x00, 0x00, 0x00, 0x00, 0x00])).toString(
-    'base64',
-  );
-}
-
-const STROBE_RED_PACKET = solidColorPacket(STROBE_RED);
-const STROBE_BLUE_PACKET = solidColorPacket(STROBE_BLUE);
-
 function led(row: number, col: number): number {
   return row * H6022_COLS + col;
 }
@@ -191,6 +174,47 @@ function range(from: number, to: number): number[] {
     out.push(i);
   }
   return out;
+}
+
+/**
+ * Police Strobo, after GyverLamp's policeStrobo pattern 3: the lamp is split
+ * horizontally into a blue half and a red half that swap places on every
+ * beat, with a static white dividing line across the middle - the "steel
+ * frame" of a police light bar.
+ *
+ * Built as a two-frame carousel scene (frame 1: blue top / red bottom,
+ * frame 2: swapped; the white divider is drawn in both), so the firmware
+ * does the alternation itself - no network traffic while running, and the
+ * frame switch is instant. rate 100 asks for the fastest carousel cadence.
+ */
+function buildPoliceStroboScene(): number[] {
+  const RED: [number, number, number] = [255, 0, 0];
+  const BLUE: [number, number, number] = [0, 0, 255];
+  const WHITE: [number, number, number] = [255, 255, 255];
+  const topHalf = range(led(0, 0), led(4, 11));
+  const divider = range(led(5, 0), led(5, 11));
+  const bottomHalf = range(led(6, 0), led(10, 11));
+
+  const frame = (top: [number, number, number], bottom: [number, number, number]): MatrixBlock => ({
+    groups: [
+      { color: top, leds: topHalf },
+      { color: WHITE, leds: divider },
+      { color: bottom, leds: bottomHalf },
+    ],
+    mode: 0x00,
+    rate: 100,
+    level: 100,
+  });
+
+  return buildMatrixSceneParam([frame(BLUE, RED), frame(RED, BLUE)], true);
+}
+
+let policePacketsCache: string[] | null = null;
+export function policeStroboPackets(): string[] {
+  if (!policePacketsCache) {
+    policePacketsCache = scenePackets(buildPoliceStroboScene());
+  }
+  return policePacketsCache;
 }
 
 /**
@@ -221,30 +245,41 @@ function buildStormScene(): number[] {
     color: [45, 60, 110],
     leds: range(led(0, 0), led(1, 11)),
   };
+  // [row, col] of each raindrop head; the tail layer hangs one row above,
+  // at reduced brightness, so drops read as fast streaks instead of dots.
+  const drops: Array<[number, number]> = [
+    [2, 1], [2, 6], [2, 10],
+    [3, 3], [3, 7], [3, 11],
+    [4, 0], [4, 5], [4, 9],
+    [5, 2], [5, 7], [5, 11],
+    [6, 0], [6, 4], [6, 8],
+    [7, 1], [7, 6], [7, 10],
+    [8, 3], [8, 8], [8, 11],
+    [9, 0], [9, 5], [9, 9],
+    [10, 2], [10, 7], [10, 11],
+  ];
   const rain: MatrixGroup = {
     color: [25, 60, 255],
-    leds: [
-      led(2, 1), led(2, 6), led(2, 10),
-      led(3, 3), led(3, 7), led(3, 11),
-      led(4, 0), led(4, 5), led(4, 9),
-      led(5, 2), led(5, 7), led(5, 11),
-      led(6, 4), led(6, 8), led(6, 0),
-      led(7, 1), led(7, 6), led(7, 10),
-      led(8, 3), led(8, 8), led(8, 11),
-      led(9, 0), led(9, 5), led(9, 9),
-      led(10, 2), led(10, 7), led(10, 11),
-    ],
+    leds: drops.map(([r, c]) => led(r, c)),
+  };
+  const rainTails: MatrixGroup = {
+    color: [25, 60, 255],
+    // Wraps at the top edge; wrapped tails land on the cloud rows, where the
+    // cloud block (higher z-order) hides them.
+    leds: drops.map(([r, c]) => led((r + H6022_ROWS - 1) % H6022_ROWS, c)),
   };
 
   return buildMatrixSceneParam([
-    // twinkle @ 90: ~1s flicker period - reads as intermittent flashes.
-    { groups: [lightning], mode: 0x00, rate: 90, level: 100 },
+    // twinkle @ 100: the firmware's fastest flicker (~0.5s period).
+    { groups: [lightning], mode: 0x00, rate: 100, level: 100 },
     // twinkle @ 0: fully static (a non-zero rate made the whole cloud fade
     // in and out on a ~5s sine, disappearing half the time).
     { groups: [cloud], mode: 0x00, rate: 0, level: 40 },
-    // down @ 100: full wrap loop every ~1.3s (~118ms per row) - proper rain;
-    // 75 gave ~384ms per row, which looked like slow motion.
+    // down @ 100: the firmware's fastest scroll, a full wrap loop every
+    // ~1.3s (~118ms per row). Bytes above 100 don't go faster - they break
+    // the movement entirely (0x70 was observed to stop a moving layer).
     { groups: [rain], mode: 0x02, rate: 100, level: 100 },
+    { groups: [rainTails], mode: 0x02, rate: 100, level: 45 },
   ]);
 }
 
@@ -349,12 +384,10 @@ export function scanLanDevices(log: Logger): Promise<Map<string, string>> {
  * The lamp's IP is auto-discovered via scanLanDevices (matched by device
  * ID), cached, and refreshed in the background around each activation; a
  * configured lanIp is only a fallback for when scanning isn't possible.
- * Commands resolve the target at send time, so a long-running strobe picks
- * up a refreshed IP mid-effect.
+ * Commands resolve the target at send time.
  */
 export class H6022Lan {
   private socket?: dgram.Socket;
-  private strobeTimer?: NodeJS.Timeout;
   private discoveredIp: string | null = null;
   private lastScanAt = 0;
   private readonly deviceId: string;
@@ -431,48 +464,28 @@ export class H6022Lan {
     });
   }
 
-  private sendColor([r, g, b]: [number, number, number]): void {
-    this.send({ cmd: 'colorwc', data: { color: { r, g, b }, colorTemInKelvin: 0 } });
+  /** Powers the lamp on without touching its color (a scene upload alone may arrive while it's off). */
+  private sendTurnOn(): void {
+    this.send({ cmd: 'turn', data: { value: 1 } });
   }
 
   /**
-   * Red/blue police strobe, driven from this side: the firmware's DIY modes
-   * have no reliable "alternate solid fills" primitive, so the plugin just
-   * flips the whole lamp between red and blue every STROBE_PHASE_MS over the
-   * local LAN (no cloud round-trips involved). The first frame goes out as
-   * colorwc because that also wakes a powered-off lamp (verified live);
-   * the alternation itself uses instant BLE-style color packets, since
-   * colorwc fades between colors too slowly to strobe.
+   * Uploads and activates the police-strobo carousel scene; the firmware
+   * alternates the two frames on its own from there. Stopping the effect is
+   * the caller's job (GoveeDevice.restoreSnapshot over MQTT).
    */
   startPoliceStrobo(): void {
-    this.stop();
-    let red = true;
-    this.sendColor(STROBE_RED);
-    this.strobeTimer = setInterval(() => {
-      red = !red;
-      this.send({ cmd: 'ptReal', data: { command: [red ? STROBE_RED_PACKET : STROBE_BLUE_PACKET] } });
-    }, STROBE_PHASE_MS);
+    this.sendTurnOn();
+    this.send({ cmd: 'ptReal', data: { command: policeStroboPackets() } });
   }
 
   /** Uploads and activates the storm matrix scene; the firmware animates it from there. */
   startStorm(): void {
-    this.stop();
+    this.sendTurnOn();
     this.send({ cmd: 'ptReal', data: { command: stormScenePackets() } });
   }
 
-  /**
-   * Stops any plugin-driven animation timer. Restoring what the lamp showed
-   * before is the caller's job (GoveeDevice.restoreSnapshot over MQTT).
-   */
-  stop(): void {
-    if (this.strobeTimer) {
-      clearInterval(this.strobeTimer);
-      this.strobeTimer = undefined;
-    }
-  }
-
   dispose(): void {
-    this.stop();
     this.socket?.close();
     this.socket = undefined;
   }

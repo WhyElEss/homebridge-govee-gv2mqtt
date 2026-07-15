@@ -8,11 +8,12 @@ export const EFFECT_STORM = 'Гроза в банке';
 
 /**
  * Two Switches for LAN-driven custom effects that Govee's cloud API cannot
- * express, sent straight to the lamp over UDP (see H6022Lan):
+ * express, sent straight to the lamp over UDP (see H6022Lan). Both are DIY
+ * matrix scenes the lamp's own firmware animates after a one-shot upload:
  *
- *   - "Police Strobo": red/blue strobe driven by a plugin-side timer;
- *   - "Гроза в банке": a storm-cloud DIY matrix scene animated by the lamp's
- *     own firmware.
+ *   - "Police Strobo": blue/red halves swapping around a white divider
+ *     (a two-frame carousel);
+ *   - "Гроза в банке": a storm cloud with falling rain and lightning.
  *
  * H6022-only: the matrix-scene byte format and the strobe assumptions are
  * specific to the Table Lamp 2, so activation is refused until gv2mqtt's
@@ -45,12 +46,6 @@ export class CustomEffectsAccessory {
     this.stormService = this.addSwitch(EFFECT_STORM, 'storm-jar', () => this.lan.startStorm());
 
     device.on('change', (state) => {
-      if (!state.customEffect) {
-        // The effect ended through any path (switch off, another command
-        // taking over the lamp, a physical power-off report) - make sure a
-        // running strobe timer doesn't keep painting the lamp.
-        this.lan.stop();
-      }
       this.stroboService.updateCharacteristic(Characteristic.On, state.customEffect === EFFECT_POLICE_STROBO);
       this.stormService.updateCharacteristic(Characteristic.On, state.customEffect === EFFECT_STORM);
     });
@@ -74,7 +69,6 @@ export class CustomEffectsAccessory {
         if (value) {
           await this.activate(effectName, service, start);
         } else if (this.device.getState().customEffect === effectName) {
-          this.lan.stop();
           this.device.stopCustomEffect();
         }
       });

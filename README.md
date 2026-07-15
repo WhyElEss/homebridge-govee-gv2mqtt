@@ -220,16 +220,19 @@ gv2mqtt/Govee's cloud API, so the plugin sends them straight to the lamp
 over the local network (UDP port 4003, the same LAN API gv2mqtt itself
 uses for local control):
 
-- **Police Strobo** — the whole lamp strobes red/blue (150ms per color).
-  Driven by a plugin-side timer sending instant BLE-style color packets over
-  the LAN (`ptReal`) — the plain `colorwc` color command can't strobe, the
-  lamp eases into it with a visible fade — so it runs entirely locally with
-  no cloud round-trips.
+- **Police Strobo** — after GyverLamp's split police strobe: the top half of
+  the lamp is blue while the bottom is red, they swap on every beat, and a
+  static white line across the middle divides them like the steel frame of a
+  police light bar. Built as a two-frame carousel DIY scene at the fastest
+  carousel rate, so the firmware does the alternation itself.
 - **Гроза в банке** — a storm-cloud scene: a dim bluish static cloud across
-  the top two LED rows, blue raindrops falling down the lamp's 11×12 LED
-  matrix (~118ms per row), and white lightning flickering below the cloud.
-  Uploaded once as a custom DIY "matrix scene"; the lamp's own firmware
-  animates it from there.
+  the top two LED rows, dense blue rain streaks (each drop trails a dimmer
+  tail) falling down the lamp's 11×12 LED matrix at the firmware's fastest
+  scroll (~118ms per row), and white lightning flickering below the cloud at
+  the fastest twinkle rate.
+
+Both effects are uploaded once as a custom DIY "matrix scene" over the LAN;
+the lamp's own firmware animates them from there, with no further traffic.
 
 Turning a switch **on** snapshots the lamp's current state (exactly like the
 Alert switch) and starts the effect; turning it **off** restores the

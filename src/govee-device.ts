@@ -224,7 +224,7 @@ export class GoveeDevice extends EventEmitter {
     // Any MQTT command means gv2mqtt is driving the lamp again, which ends a
     // LAN-driven custom effect. Cleared silently: every path that publishes
     // as part of a user-visible change emits 'change' itself afterwards, and
-    // CustomEffectsAccessory stops its strobe timer on that event.
+    // CustomEffectsAccessory syncs its switches on that event.
     this.state.customEffect = null;
     if (typeof payload.color_temp === 'number') {
       // Remember the last color temperature actually sent to the device, so
@@ -376,15 +376,13 @@ export class GoveeDevice extends EventEmitter {
       // that wipe out an effect selection that was just made.
       this.resetToNormalLight();
       // A trusted "off" (e.g. the lamp's physical button) also ends a
-      // LAN-driven custom effect; CustomEffectsAccessory stops its strobe
-      // timer on the resulting 'change' event, so the lamp stays off
-      // instead of being relit by the next timer tick.
+      // LAN-driven custom effect.
       this.state.customEffect = null;
     }
 
     if (this.state.customEffect) {
       // A LAN-driven custom effect is running: the lamp shows a DIY scene
-      // (or a plugin-driven strobe) that gv2mqtt knows nothing about, so
+      // that gv2mqtt knows nothing about, so
       // don't let its mode/effect interpretation of the report overwrite
       // ours. In particular, flipping mode back to 'adaptive' here would
       // re-enable Adaptive Lighting nudges, whose color-temp commands would
