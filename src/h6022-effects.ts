@@ -162,9 +162,24 @@ function scenePackets(sceneParam: number[]): string[] {
 // ---------------------------------------------------------------------------
 
 /** Milliseconds each red/blue phase of Police Strobo lasts. */
-const STROBE_PHASE_MS = 400;
+const STROBE_PHASE_MS = 150;
 const STROBE_RED: [number, number, number] = [255, 0, 0];
 const STROBE_BLUE: [number, number, number] = [0, 0, 255];
+
+/**
+ * Solid color as a single BLE-style packet (H6022's 0x33 0x05 0x0d command,
+ * from dvdavd/govee-h6022-ble's setColour). Sent via ptReal it applies
+ * instantly, unlike the LAN "colorwc" command, which the lamp eases into
+ * with a visible fade - far too slow for a strobe.
+ */
+function solidColorPacket([r, g, b]: [number, number, number]): string {
+  return Buffer.from(finishPacket([0x33, 0x05, 0x0d, r & 0xff, g & 0xff, b & 0xff, 0x00, 0x00, 0x00, 0x00, 0x00])).toString(
+    'base64',
+  );
+}
+
+const STROBE_RED_PACKET = solidColorPacket(STROBE_RED);
+const STROBE_BLUE_PACKET = solidColorPacket(STROBE_BLUE);
 
 function led(row: number, col: number): number {
   return row * H6022_COLS + col;
@@ -189,8 +204,11 @@ function range(from: number, to: number): number[] {
  *   3. rain      - scattered blue drops scrolling down with wraparound
  *      (they pass behind the cloud layer while wrapping).
  *
- * All rates/levels/colors are first-guess values meant to be tuned on the
- * real lamp.
+ * Layer timing semantics (from dvdavd/govee-h6022-ble's calibrated preview,
+ * govee-matrix.js): a twinkle layer pulses on a sine with period
+ * 5500 - rate*50 ms (floor 500ms) between 18% and 100% alpha, and rate 0
+ * means fully static; a moving layer completes a full wrap loop in
+ * 13000 - rate*117 ms (floor 1300ms).
  */
 function buildStormScene(): number[] {
   const lightning: MatrixGroup = {
@@ -198,7 +216,9 @@ function buildStormScene(): number[] {
     leds: [led(2, 3), led(3, 4), led(4, 3), led(5, 4), led(2, 8), led(3, 9), led(4, 8)],
   };
   const cloud: MatrixGroup = {
-    color: [115, 125, 145],
+    // Dim and bluish on purpose: a "gray" on RGB LEDs is just faint white,
+    // which made the cloud read as the same color as the lightning.
+    color: [45, 60, 110],
     leds: range(led(0, 0), led(1, 11)),
   };
   const rain: MatrixGroup = {
@@ -217,9 +237,14 @@ function buildStormScene(): number[] {
   };
 
   return buildMatrixSceneParam([
-    { groups: [lightning], mode: 0x00, rate: 95, level: 100 },
-    { groups: [cloud], mode: 0x00, rate: 12, level: 65 },
-    { groups: [rain], mode: 0x02, rate: 75, level: 100 },
+    // twinkle @ 90: ~1s flicker period - reads as intermittent flashes.
+    { groups: [lightning], mode: 0x00, rate: 90, level: 100 },
+    // twinkle @ 0: fully static (a non-zero rate made the whole cloud fade
+    // in and out on a ~5s sine, disappearing half the time).
+    { groups: [cloud], mode: 0x00, rate: 0, level: 40 },
+    // down @ 100: full wrap loop every ~1.3s (~118ms per row) - proper rain;
+    // 75 gave ~384ms per row, which looked like slow motion.
+    { groups: [rain], mode: 0x02, rate: 100, level: 100 },
   ]);
 }
 
@@ -274,7 +299,10 @@ export class H6022Lan {
    * Red/blue police strobe, driven from this side: the firmware's DIY modes
    * have no reliable "alternate solid fills" primitive, so the plugin just
    * flips the whole lamp between red and blue every STROBE_PHASE_MS over the
-   * local LAN (no cloud round-trips involved).
+   * local LAN (no cloud round-trips involved). The first frame goes out as
+   * colorwc because that also wakes a powered-off lamp (verified live);
+   * the alternation itself uses instant BLE-style color packets, since
+   * colorwc fades between colors too slowly to strobe.
    */
   startPoliceStrobo(): void {
     this.stop();
@@ -282,7 +310,7 @@ export class H6022Lan {
     this.sendColor(STROBE_RED);
     this.strobeTimer = setInterval(() => {
       red = !red;
-      this.sendColor(red ? STROBE_RED : STROBE_BLUE);
+      this.send({ cmd: 'ptReal', data: { command: [red ? STROBE_RED_PACKET : STROBE_BLUE_PACKET] } });
     }, STROBE_PHASE_MS);
   }
 
