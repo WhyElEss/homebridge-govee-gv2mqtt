@@ -3,7 +3,7 @@ import { Logger } from 'homebridge';
 import { MqttClient } from 'mqtt';
 import { ResolvedDeviceConfig } from './config';
 import { buildEffectNames, NORMAL_LIGHT } from './effects';
-import { hueSatToRgb, rgbToHueSat } from './color';
+import { hueSatToRgb, RGB, rgbToHueSat } from './color';
 
 export type GoveeColorMode = 'adaptive' | 'rgb' | 'effect';
 
@@ -176,7 +176,7 @@ export class GoveeDevice extends EventEmitter {
     });
 
     if (config.turnOffOnStartup) {
-      setTimeout(() => this.publish({ state: 'OFF' }), config.turnOffOnStartupDelayMs);
+      setTimeout(() => this.publishPowerOff(), config.turnOffOnStartupDelayMs);
     }
   }
 
@@ -218,6 +218,44 @@ export class GoveeDevice extends EventEmitter {
     this.lastLocalSetAt = Date.now();
   }
 
+  // The four gv2mqtt command shapes this plugin ever sends. gv2mqtt only
+  // issues an explicit power-on for a bare {state:"ON"}; color_temp/color/
+  // brightness fields each map onto their own Govee API call instead (which
+  // still wakes a sleeping lamp - see the physical-power-off guards).
+  private publishPowerOff(): void {
+    this.publish({ state: 'OFF' });
+  }
+
+  private publishColorTemp(mireds: number, brightness?: number): void {
+    if (brightness === undefined) {
+      this.publish({ state: 'ON', color_temp: mireds });
+    } else {
+      this.publish({ state: 'ON', color_temp: mireds, brightness });
+    }
+  }
+
+  private publishRgb(color: RGB, brightness: number): void {
+    this.publish({ state: 'ON', color, brightness });
+  }
+
+  private publishEffect(name: string): void {
+    this.publish({ state: 'ON', effect: name });
+  }
+
+  /**
+   * Any HomeKit-originated power-on means an "on" is now expected - stop
+   * defending a physical power-off (see handleMessage's watchdog).
+   */
+  private disarmOffWatchdog(): void {
+    this.offEnforceUntil = 0;
+  }
+
+  /** Back to plain (non-effect) light mode; what "on" means unless an effect is chosen. */
+  private resetToNormalLight(): void {
+    this.state.mode = 'adaptive';
+    this.state.effectIndex = 1;
+  }
+
   private handleMessage(payload: string): void {
     this.log.debug(`[${this.config.name}] Received MQTT: ${this.config.stateTopic} = ${payload}`);
     let msg: IncomingMessage;
@@ -229,7 +267,19 @@ export class GoveeDevice extends EventEmitter {
     }
 
     const reportedOn = msg.state === 'ON';
+    if (this.defendPhysicalOff(reportedOn)) {
+      return; // suppressed a bogus "on"; nothing else in the report is trustworthy
+    }
+    this.applyReportedState(msg, reportedOn);
+    this.emit('change', this.getState());
+  }
 
+  /**
+   * Guards a physical (out-of-band) power-off against being undone by
+   * Adaptive Lighting traffic. Returns true when an unsolicited "on" report
+   * was suppressed and must not be applied to state at all.
+   */
+  private defendPhysicalOff(reportedOn: boolean): boolean {
     if (!reportedOn) {
       const sinceNudge = Date.now() - this.lastAlCommandAt;
       if (this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS) {
@@ -266,10 +316,13 @@ export class GoveeDevice extends EventEmitter {
             `[${this.config.name}] Device reported OFF right after an Adaptive Lighting nudge; ` +
               're-asserting OFF in case the nudge woke it back up',
           );
-          this.publish({ state: 'OFF' });
+          this.publishPowerOff();
         }
       }
-    } else if (
+      return false;
+    }
+
+    if (
       !this.state.isOn &&
       Date.now() < this.offEnforceUntil &&
       this.offEnforceAttempts < OFF_ENFORCE_MAX_REASSERTS
@@ -284,10 +337,13 @@ export class GoveeDevice extends EventEmitter {
         `[${this.config.name}] Unsolicited ON while defending a physical power-off; ` +
           `pushing it back off (attempt ${this.offEnforceAttempts}/${OFF_ENFORCE_MAX_REASSERTS})`,
       );
-      this.publish({ state: 'OFF' });
-      return;
+      this.publishPowerOff();
+      return true;
     }
+    return false;
+  }
 
+  private applyReportedState(msg: IncomingMessage, reportedOn: boolean): void {
     this.state.isOn = reportedOn;
     if (!this.state.isOn && !this.withinOptimisticWindow()) {
       // Only trust an "off" report enough to reset mode/effect bookkeeping
@@ -297,8 +353,7 @@ export class GoveeDevice extends EventEmitter {
       // consistency race server-side, not anything this plugin published) -
       // still reflect isOn honestly either way, but don't let a blip like
       // that wipe out an effect selection that was just made.
-      this.state.mode = 'adaptive';
-      this.state.effectIndex = 1;
+      this.resetToNormalLight();
     }
 
     if (this.state.isOn && !this.withinOptimisticWindow()) {
@@ -321,8 +376,6 @@ export class GoveeDevice extends EventEmitter {
         this.state.brightness = msg.brightness;
       }
     }
-
-    this.emit('change', this.getState());
   }
 
   /**
@@ -384,16 +437,15 @@ export class GoveeDevice extends EventEmitter {
     }
 
     if (on) {
-      this.offEnforceUntil = 0;
+      this.disarmOffWatchdog();
     }
     this.markLocalChange();
     this.state.isOn = on;
-    this.state.mode = 'adaptive';
-    this.state.effectIndex = 1;
+    this.resetToNormalLight();
     if (on) {
-      this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
+      this.publishColorTemp(this.state.mireds, this.state.brightness);
     } else {
-      this.publish({ state: 'OFF' });
+      this.publishPowerOff();
     }
     this.emit('change', this.getState());
   }
@@ -421,9 +473,8 @@ export class GoveeDevice extends EventEmitter {
         return;
       }
       this.log.debug(`[${this.config.name}] setBrightness: exiting effect mode (real brightness change)`);
-      this.state.mode = 'adaptive';
-      this.state.effectIndex = 1;
-      this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
+      this.resetToNormalLight();
+      this.publishColorTemp(this.state.mireds, this.state.brightness);
     } else {
       this.publish({ state: 'ON', brightness: this.state.brightness });
     }
@@ -476,7 +527,7 @@ export class GoveeDevice extends EventEmitter {
         }
         this.markLocalChange();
         this.lastAlCommandAt = Date.now();
-        this.publish({ state: 'ON', color_temp: this.state.mireds });
+        this.publishColorTemp(this.state.mireds);
       }, AL_PUBLISH_DELAY_MS);
       this.emit('change', this.getState());
       return;
@@ -484,7 +535,7 @@ export class GoveeDevice extends EventEmitter {
 
     this.markLocalChange();
     this.state.mode = 'adaptive';
-    this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
+    this.publishColorTemp(this.state.mireds, this.state.brightness);
     this.emit('change', this.getState());
   }
 
@@ -538,12 +589,12 @@ export class GoveeDevice extends EventEmitter {
       this.state.mireds = mireds;
       if (this.state.isOn && this.state.mode !== 'effect') {
         this.state.mode = 'adaptive';
-        this.publish({ state: 'ON', color_temp: mireds, brightness: bri });
+        this.publishColorTemp(mireds, bri);
       }
     } else {
       if (this.state.isOn) {
         this.state.mode = 'rgb';
-        this.publish({ state: 'ON', color: { r, g, b }, brightness: bri });
+        this.publishRgb({ r, g, b }, bri);
       }
     }
     this.emit('change', this.getState());
@@ -552,7 +603,7 @@ export class GoveeDevice extends EventEmitter {
   setEffectIndex(index: number): void {
     const name = index <= 1 ? NORMAL_LIGHT : this.nameForIdentifier(index);
     this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
-    this.offEnforceUntil = 0;
+    this.disarmOffWatchdog();
     this.markLocalChange();
     // HomeKit doesn't guarantee whether Active or ActiveIdentifier arrives
     // first when an automation turns the light on with an effect selected.
@@ -562,13 +613,12 @@ export class GoveeDevice extends EventEmitter {
     // resetting back to Normal Light.
     this.state.isOn = true;
     if (index <= 1 || !name) {
-      this.state.effectIndex = 1;
-      this.state.mode = 'adaptive';
-      this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
+      this.resetToNormalLight();
+      this.publishColorTemp(this.state.mireds, this.state.brightness);
     } else {
       this.state.effectIndex = index;
       this.state.mode = 'effect';
-      this.publish({ state: 'ON', effect: name });
+      this.publishEffect(name);
       // Govee's own cloud API appears to be able to race an effect/scene
       // command against an unrelated color-temperature command issued
       // several seconds earlier (e.g. Adaptive Lighting's periodic nudge),
@@ -587,7 +637,7 @@ export class GoveeDevice extends EventEmitter {
         this.effectReassertTimer = undefined;
         if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
           this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" to guard against a server-side race`);
-          this.publish({ state: 'ON', effect: name });
+          this.publishEffect(name);
         }
       }, 5000);
     }
@@ -603,18 +653,10 @@ export class GoveeDevice extends EventEmitter {
    * wheel), since an alert color is a deliberate, explicit choice.
    */
   triggerAlert(hue: number, saturation: number, brightness: number): void {
-    this.snapshot = {
-      isOn: this.state.isOn,
-      mode: this.state.mode,
-      mireds: this.state.mireds,
-      hue: this.state.hue,
-      saturation: this.state.saturation,
-      brightness: this.state.brightness,
-      effectIndex: this.state.effectIndex,
-    };
+    this.snapshot = this.captureSnapshot();
     this.log.debug(`[${this.config.name}] Captured snapshot before alert: ${JSON.stringify(this.snapshot)}`);
 
-    this.offEnforceUntil = 0;
+    this.disarmOffWatchdog();
     this.markLocalChange();
     this.state.isOn = true;
     this.state.mode = 'rgb';
@@ -623,9 +665,13 @@ export class GoveeDevice extends EventEmitter {
     this.state.brightness = brightness;
     this.state.alertActive = true;
 
-    const { r, g, b } = hueSatToRgb(hue, saturation, brightness);
-    this.publish({ state: 'ON', color: { r, g, b }, brightness });
+    this.publishRgb(hueSatToRgb(hue, saturation, brightness), brightness);
     this.emit('change', this.getState());
+  }
+
+  private captureSnapshot(): StateSnapshot {
+    const { isOn, mode, mireds, hue, saturation, brightness, effectIndex } = this.state;
+    return { isOn, mode, mireds, hue, saturation, brightness, effectIndex };
   }
 
   /** Reverses triggerAlert(), reapplying whatever was captured - including a specific effect. */
@@ -641,27 +687,19 @@ export class GoveeDevice extends EventEmitter {
     }
 
     if (snap.isOn) {
-      this.offEnforceUntil = 0;
+      this.disarmOffWatchdog();
     }
     this.markLocalChange();
-    this.state.isOn = snap.isOn;
-    this.state.mode = snap.mode;
-    this.state.mireds = snap.mireds;
-    this.state.hue = snap.hue;
-    this.state.saturation = snap.saturation;
-    this.state.brightness = snap.brightness;
-    this.state.effectIndex = snap.effectIndex;
+    Object.assign(this.state, snap);
 
     if (!snap.isOn) {
-      this.publish({ state: 'OFF' });
+      this.publishPowerOff();
     } else if (snap.mode === 'effect') {
-      const name = this.nameForIdentifier(snap.effectIndex) ?? NORMAL_LIGHT;
-      this.publish({ state: 'ON', effect: name });
+      this.publishEffect(this.nameForIdentifier(snap.effectIndex) ?? NORMAL_LIGHT);
     } else if (snap.mode === 'rgb') {
-      const { r, g, b } = hueSatToRgb(snap.hue, snap.saturation, snap.brightness);
-      this.publish({ state: 'ON', color: { r, g, b }, brightness: snap.brightness });
+      this.publishRgb(hueSatToRgb(snap.hue, snap.saturation, snap.brightness), snap.brightness);
     } else {
-      this.publish({ state: 'ON', color_temp: snap.mireds, brightness: snap.brightness });
+      this.publishColorTemp(snap.mireds, snap.brightness);
     }
 
     this.log.debug(`[${this.config.name}] Restored snapshot: ${JSON.stringify(snap)}`);

@@ -33,12 +33,6 @@
         "default": "gv2mqtt/light",
         "description": "Matches the govee2mqtt bridge topic layout: <prefix>/<deviceId>/state and <prefix>/<deviceId>/command"
       },
-      "debounceRecvMs": {
-        "title": "Incoming Message Debounce (ms)",
-        "type": "integer",
-        "default": 100,
-        "minimum": 0
-      },
       "optimisticCacheMs": {
         "title": "Optimistic Cache Window (ms)",
         "type": "integer",
@@ -176,7 +170,6 @@
     "mqttUsername",
     "mqttPassword",
     "topicPrefix",
-    "debounceRecvMs",
     "optimisticCacheMs",
     "refreshStateOnConnect",
     "haDiscoveryPrefix",

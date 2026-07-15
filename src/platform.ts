@@ -10,7 +10,14 @@ import {
 } from 'homebridge';
 import mqtt, { MqttClient } from 'mqtt';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings';
-import { DeviceConfig, GoveePlatformConfig, resolveDeviceConfig, ResolvedDeviceConfig } from './config';
+import {
+  DeviceConfig,
+  GoveePlatformConfig,
+  resolveDeviceConfig,
+  ResolvedDeviceConfig,
+  resolvePlatformConfig,
+  ResolvedPlatformConfig,
+} from './config';
 import { GoveeDevice } from './govee-device';
 import { LightAccessory } from './light-accessory';
 import { EffectsAccessory } from './effects-accessory';
@@ -28,6 +35,8 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   private readonly accessories = new Map<string, PlatformAccessory>();
   /** Device IDs registered so far this run, whether from config or auto-discovery. */
   private readonly knownDeviceIds = new Set<string>();
+  /** Platform-level config with all defaults applied. */
+  private readonly settings: ResolvedPlatformConfig;
   private client?: MqttClient;
 
   constructor(
@@ -37,6 +46,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   ) {
     this.Service = api.hap.Service;
     this.Characteristic = api.hap.Characteristic;
+    this.settings = resolvePlatformConfig(config as GoveePlatformConfig);
 
     this.api.on('didFinishLaunching', () => {
       this.connectAndDiscover();
@@ -49,24 +59,15 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   }
 
   private connectAndDiscover(): void {
-    const cfg = this.config as GoveePlatformConfig;
+    const cfg = this.settings;
 
     if (!cfg.mqttUrl) {
       this.log.error('"mqttUrl" is not configured; cannot connect to the MQTT broker.');
       return;
     }
-    const devices = cfg.devices ?? [];
-    const autoDiscover = cfg.autoDiscover ?? false;
-    if (devices.length === 0 && !autoDiscover) {
+    if (cfg.devices.length === 0 && !cfg.autoDiscover) {
       this.log.warn('No devices configured and autoDiscover is off; nothing to expose.');
     }
-
-    const refreshStateOnConnect = cfg.refreshStateOnConnect ?? true;
-    const haDiscoveryPrefix = cfg.haDiscoveryPrefix ?? 'homeassistant';
-    const haStatusTopic = cfg.haStatusTopic ?? `${haDiscoveryPrefix}/status`;
-    const periodicRefreshIntervalMs = cfg.periodicRefreshIntervalMs ?? 0;
-    const topicPrefix = cfg.topicPrefix ?? 'gv2mqtt/light';
-    const optimisticCacheMs = cfg.optimisticCacheMs ?? 10000;
 
     this.client = mqtt.connect(cfg.mqttUrl, {
       username: cfg.mqttUsername,
@@ -81,20 +82,20 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       // config + state for every device whenever it sees a message on the
       // Home Assistant "birth" topic (thinking HA just restarted) - so we
       // piggyback on that for all three instead of waiting indefinitely.
-      this.client!.publish(haStatusTopic, 'online');
+      this.client!.publish(cfg.haStatusTopic, 'online');
     };
 
     this.client.on('connect', () => {
       this.log.info(`Connected to MQTT broker at ${cfg.mqttUrl}`);
-      if (refreshStateOnConnect) {
+      if (cfg.refreshStateOnConnect) {
         pingHomeAssistantBirth();
       }
     });
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 
-    if (refreshStateOnConnect && periodicRefreshIntervalMs > 0) {
-      setInterval(() => pingHomeAssistantBirth(), periodicRefreshIntervalMs);
+    if (cfg.refreshStateOnConnect && cfg.periodicRefreshIntervalMs > 0) {
+      setInterval(() => pingHomeAssistantBirth(), cfg.periodicRefreshIntervalMs);
     }
 
     // A newly auto-discovered device's own GoveeDevice subscribes to its
@@ -105,7 +106,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     // devices only triggers one extra ping.
     let rediscoveryPingTimer: NodeJS.Timeout | undefined;
     const scheduleFollowUpPing = () => {
-      if (!refreshStateOnConnect) {
+      if (!cfg.refreshStateOnConnect) {
         return;
       }
       if (rediscoveryPingTimer) {
@@ -114,18 +115,18 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       rediscoveryPingTimer = setTimeout(() => pingHomeAssistantBirth(), 3000);
     };
 
-    for (const deviceCfg of devices) {
-      const resolved = resolveDeviceConfig(deviceCfg, topicPrefix, haDiscoveryPrefix);
+    for (const deviceCfg of cfg.devices) {
+      const resolved = resolveDeviceConfig(deviceCfg, cfg.topicPrefix, cfg.haDiscoveryPrefix);
       this.knownDeviceIds.add(deviceCfg.deviceId);
       if (!resolved.enabled) {
         this.log.info(`"${resolved.name}" (${resolved.deviceId}) is disabled; not exposing it.`);
         continue;
       }
-      this.registerDevice(resolved, optimisticCacheMs);
+      this.registerDevice(resolved);
     }
 
-    if (autoDiscover) {
-      this.setupAutoDiscovery(topicPrefix, haDiscoveryPrefix, optimisticCacheMs, scheduleFollowUpPing);
+    if (cfg.autoDiscover) {
+      this.setupAutoDiscovery(scheduleFollowUpPing);
     }
 
     // With autoDiscover, newly-found devices only show up asynchronously as
@@ -135,8 +136,8 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     // pruning to give that a chance to happen first; without autoDiscover,
     // the expected device set is fully known synchronously, so prune right
     // away as before.
-    const pruneDelayMs = autoDiscover ? 20000 : 0;
-    setTimeout(() => this.pruneStaleAccessories(devices), pruneDelayMs);
+    const pruneDelayMs = cfg.autoDiscover ? 20000 : 0;
+    setTimeout(() => this.pruneStaleAccessories(cfg.devices), pruneDelayMs);
   }
 
   /**
@@ -159,12 +160,8 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
    * Config UI X's normal settings form exactly as if added by hand - from
    * then on they're "explicit" and autoDiscover leaves them alone.
    */
-  private setupAutoDiscovery(
-    topicPrefix: string,
-    haDiscoveryPrefix: string,
-    optimisticCacheMs: number,
-    scheduleFollowUpPing: () => void,
-  ): void {
+  private setupAutoDiscovery(scheduleFollowUpPing: () => void): void {
+    const { topicPrefix, haDiscoveryPrefix } = this.settings;
     const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/gv2mqtt-([^/]+)/config$`);
     const segmentSuffix = /-\d+$/;
 
@@ -194,7 +191,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
 
       this.log.info(`autoDiscover: found new device "${name}" (${deviceId}), adding it to devices[] in config.json`);
       const resolved = resolveDeviceConfig({ deviceId, name }, topicPrefix, haDiscoveryPrefix);
-      this.registerDevice(resolved, optimisticCacheMs);
+      this.registerDevice(resolved);
       this.knownDeviceIds.add(deviceId);
       this.persistDiscoveredDevice(deviceId, name);
       scheduleFollowUpPing();
@@ -248,8 +245,8 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private registerDevice(resolved: ResolvedDeviceConfig, optimisticCacheMs: number): void {
-    const device = new GoveeDevice(this.client!, resolved, optimisticCacheMs, this.log);
+  private registerDevice(resolved: ResolvedDeviceConfig): void {
+    const device = new GoveeDevice(this.client!, resolved, this.settings.optimisticCacheMs, this.log);
 
     this.addOrRestoreAccessory(
       `${resolved.deviceId}-light`,

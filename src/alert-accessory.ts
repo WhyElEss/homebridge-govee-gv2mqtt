@@ -1,4 +1,4 @@
-import { PlatformAccessory, Service } from 'homebridge';
+import { PlatformAccessory } from 'homebridge';
 import { GoveeGv2MqttPlatform } from './platform';
 import { GoveeDevice } from './govee-device';
 

@@ -31,7 +31,6 @@ export interface GoveePlatformConfig extends PlatformConfig {
   mqttUsername?: string;
   mqttPassword?: string;
   topicPrefix?: string;
-  debounceRecvMs?: number;
   optimisticCacheMs?: number;
   refreshStateOnConnect?: boolean;
   haStatusTopic?: string;
@@ -39,6 +38,38 @@ export interface GoveePlatformConfig extends PlatformConfig {
   periodicRefreshIntervalMs?: number;
   autoDiscover?: boolean;
   devices?: DeviceConfig[];
+}
+
+/** GoveePlatformConfig with every optional field resolved to its default. */
+export interface ResolvedPlatformConfig {
+  mqttUrl: string;
+  mqttUsername?: string;
+  mqttPassword?: string;
+  topicPrefix: string;
+  optimisticCacheMs: number;
+  refreshStateOnConnect: boolean;
+  haDiscoveryPrefix: string;
+  haStatusTopic: string;
+  periodicRefreshIntervalMs: number;
+  autoDiscover: boolean;
+  devices: DeviceConfig[];
+}
+
+export function resolvePlatformConfig(config: GoveePlatformConfig): ResolvedPlatformConfig {
+  const haDiscoveryPrefix = config.haDiscoveryPrefix ?? 'homeassistant';
+  return {
+    mqttUrl: config.mqttUrl,
+    mqttUsername: config.mqttUsername,
+    mqttPassword: config.mqttPassword,
+    topicPrefix: config.topicPrefix ?? 'gv2mqtt/light',
+    optimisticCacheMs: config.optimisticCacheMs ?? 10000,
+    refreshStateOnConnect: config.refreshStateOnConnect ?? true,
+    haDiscoveryPrefix,
+    haStatusTopic: config.haStatusTopic ?? `${haDiscoveryPrefix}/status`,
+    periodicRefreshIntervalMs: config.periodicRefreshIntervalMs ?? 0,
+    autoDiscover: config.autoDiscover ?? false,
+    devices: config.devices ?? [],
+  };
 }
 
 export interface ResolvedDeviceConfig {

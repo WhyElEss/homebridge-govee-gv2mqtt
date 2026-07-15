@@ -20,6 +20,11 @@ function slugify(name: string): string {
   );
 }
 
+/** HAP service subtype for an effect's InputSource; stable across restarts because it's name-derived. */
+function subtypeForEffect(name: string): string {
+  return `effect-${slugify(name)}`;
+}
+
 /**
  * Exposes Govee's scene/music/DIY effects as a Television accessory's
  * "Inputs", mirroring the original mqttthing hack: HomeKit's Lightbulb
@@ -91,7 +96,7 @@ export class EffectsAccessory {
       names = names.slice(0, MAX_INPUTS);
     }
 
-    const desiredSubtypes = new Set(names.map((name) => `effect-${slugify(name)}`));
+    const desiredSubtypes = new Set(names.map(subtypeForEffect));
 
     // Remove stale InputSource services *before* adding new ones. Matters
     // both when the list shrinks and, critically, when migrating from an
@@ -109,7 +114,7 @@ export class EffectsAccessory {
 
     names.forEach((name) => {
       const identifier = this.device.identifierForName(name);
-      const subtype = `effect-${slugify(name)}`;
+      const subtype = subtypeForEffect(name);
       const input =
         this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, name, subtype);
 
