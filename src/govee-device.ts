@@ -68,6 +68,37 @@ const AL_PUBLISH_DELAY_MS = 5000;
  */
 const AL_OFF_REASSERT_WINDOW_MS = 20000;
 
+/**
+ * "An AL nudge was commanding this lamp recently" - i.e. within one nudge
+ * interval (HAP-NodeJS sends them every updateInterval, 60s by default).
+ * Used to decide whether a device-reported "off" happened while Adaptive
+ * Lighting was actively driving the lamp, which is the only situation in
+ * which Govee's cloud has been observed to settle an earlier command AFTER
+ * a physical power-off and relight the lamp on its own.
+ */
+const AL_NUDGE_RECENT_MS = 60000;
+
+/**
+ * After a device-reported "off" that arrived while AL was actively nudging
+ * (see AL_NUDGE_RECENT_MS), treat the off as the user's explicit intent -
+ * they pressed the lamp's physical button - and defend it: any "on" report
+ * arriving within this window without a matching HomeKit-originated power-on
+ * gets answered with an OFF command. Bounded by OFF_ENFORCE_MAX_REASSERTS
+ * so a genuine out-of-band power-on (Govee app, second button press) can
+ * only be fought a few times, then wins.
+ */
+const OFF_ENFORCE_WINDOW_MS = 30000;
+const OFF_ENFORCE_MAX_REASSERTS = 3;
+
+/**
+ * Minimum change in mireds since the last color_temp we actually sent for
+ * an AL nudge to be worth publishing at all. AL drifts a few mireds a
+ * minute; a sub-5-mired step is imperceptible, and every skipped command is
+ * one less thing sitting in Govee's cloud pipeline for a physical button
+ * press to race against.
+ */
+const AL_MIN_NUDGE_DELTA_MIREDS = 5;
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -93,6 +124,9 @@ export class GoveeDevice extends EventEmitter {
   private effectReassertTimer?: NodeJS.Timeout;
   private alPublishTimer?: NodeJS.Timeout;
   private lastAlCommandAt = 0;
+  private lastSentMireds = -1;
+  private offEnforceUntil = 0;
+  private offEnforceAttempts = 0;
   private snapshot: StateSnapshot | null = null;
 
   /**
@@ -171,6 +205,11 @@ export class GoveeDevice extends EventEmitter {
   }
 
   private publish(payload: Record<string, unknown>): void {
+    if (typeof payload.color_temp === 'number') {
+      // Remember the last color temperature actually sent to the device, so
+      // deferred AL nudges can skip re-sending an imperceptible change.
+      this.lastSentMireds = payload.color_temp;
+    }
     this.log.debug(`[${this.config.name}] Publishing MQTT: ${this.config.commandTopic} = ${JSON.stringify(payload)}`);
     this.client.publish(this.config.commandTopic, JSON.stringify(payload));
   }
@@ -189,22 +228,67 @@ export class GoveeDevice extends EventEmitter {
       return;
     }
 
-    this.state.isOn = msg.state === 'ON';
-    if (!this.state.isOn && Date.now() - this.lastAlCommandAt < AL_OFF_REASSERT_WINDOW_MS) {
-      // The device reports "off" moments after we published an Adaptive
-      // Lighting nudge - almost certainly the light was just powered off
-      // physically (its button) and our automatic nudge raced that through
-      // Govee's cloud. gv2mqtt maps a color-temperature command onto Govee
-      // API calls that wake the lamp back up, so re-assert the off the user
-      // asked for with the button. Never triggered by deliberate HomeKit
-      // changes - lastAlCommandAt is only ever set by AL's background nudges.
-      this.lastAlCommandAt = 0;
+    const reportedOn = msg.state === 'ON';
+
+    if (!reportedOn) {
+      const sinceNudge = Date.now() - this.lastAlCommandAt;
+      if (this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS) {
+        // The device reports "off" while Adaptive Lighting was actively
+        // nudging it - i.e. the light was just powered off out-of-band (its
+        // physical button), not through HomeKit (HomeKit offs go through
+        // setOn, which doesn't touch lastAlCommandAt). Two hazards follow,
+        // both observed with Govee's cloud:
+        //
+        // 1. A nudge we published moments ago may still be in flight and
+        //    wake the lamp back up (gv2mqtt maps color-temp commands onto
+        //    Govee API calls that power it on). Re-assert the off.
+        // 2. Govee's cloud can also settle an older, already-delivered
+        //    command AFTER the physical off, relighting the lamp on its
+        //    own with no further input from us. That arrives here as an
+        //    unsolicited "on" report - arm a short watchdog window in which
+        //    such an "on" (one no HomeKit action asked for) is answered
+        //    with an OFF command; see the reportedOn branch below.
+        if (Date.now() >= this.offEnforceUntil) {
+          // Only arm a fresh window if one isn't already running - our own
+          // corrective OFFs echo back as more "off" reports, and letting
+          // those re-arm the window/attempt budget would make the watchdog
+          // self-perpetuating.
+          this.offEnforceUntil = Date.now() + OFF_ENFORCE_WINDOW_MS;
+          this.offEnforceAttempts = 0;
+          this.log.debug(
+            `[${this.config.name}] Out-of-band OFF during active Adaptive Lighting; ` +
+              `defending it for ${OFF_ENFORCE_WINDOW_MS / 1000}s`,
+          );
+        }
+        if (sinceNudge < AL_OFF_REASSERT_WINDOW_MS) {
+          this.lastAlCommandAt = 0;
+          this.log.debug(
+            `[${this.config.name}] Device reported OFF right after an Adaptive Lighting nudge; ` +
+              're-asserting OFF in case the nudge woke it back up',
+          );
+          this.publish({ state: 'OFF' });
+        }
+      }
+    } else if (
+      !this.state.isOn &&
+      Date.now() < this.offEnforceUntil &&
+      this.offEnforceAttempts < OFF_ENFORCE_MAX_REASSERTS
+    ) {
+      // Unsolicited "on" while defending a physical power-off: nothing in
+      // HomeKit asked for this (every local power-on path - setOn,
+      // setEffectIndex, triggerAlert, restoreSnapshot - disarms the
+      // watchdog first), so it's Govee's cloud settling a stale command.
+      // Push it back off and don't reflect the bogus "on" into HomeKit.
+      this.offEnforceAttempts += 1;
       this.log.debug(
-        `[${this.config.name}] Device reported OFF right after an Adaptive Lighting nudge; ` +
-          're-asserting OFF in case the nudge woke it back up',
+        `[${this.config.name}] Unsolicited ON while defending a physical power-off; ` +
+          `pushing it back off (attempt ${this.offEnforceAttempts}/${OFF_ENFORCE_MAX_REASSERTS})`,
       );
       this.publish({ state: 'OFF' });
+      return;
     }
+
+    this.state.isOn = reportedOn;
     if (!this.state.isOn && !this.withinOptimisticWindow()) {
       // Only trust an "off" report enough to reset mode/effect bookkeeping
       // once we're past the optimistic window. gv2mqtt/Govee's cloud can
@@ -299,6 +383,9 @@ export class GoveeDevice extends EventEmitter {
       return;
     }
 
+    if (on) {
+      this.offEnforceUntil = 0;
+    }
     this.markLocalChange();
     this.state.isOn = on;
     this.state.mode = 'adaptive';
@@ -370,6 +457,20 @@ export class GoveeDevice extends EventEmitter {
           this.log.debug(
             `[${this.config.name}] Dropping deferred Adaptive Lighting nudge - ` +
               `isOn=${this.state.isOn}, mode=${this.state.mode}`,
+          );
+          return;
+        }
+        if (
+          this.lastSentMireds >= 0 &&
+          Math.abs(this.state.mireds - this.lastSentMireds) < AL_MIN_NUDGE_DELTA_MIREDS
+        ) {
+          // Imperceptible drift since the last color_temp we actually sent;
+          // skip the command entirely. The fewer commands sit in Govee's
+          // cloud pipeline, the fewer chances a physical button press has
+          // to race one of them.
+          this.log.debug(
+            `[${this.config.name}] Skipping Adaptive Lighting nudge - ` +
+              `${this.state.mireds} mireds is within ${AL_MIN_NUDGE_DELTA_MIREDS} of last-sent ${this.lastSentMireds}`,
           );
           return;
         }
@@ -451,6 +552,7 @@ export class GoveeDevice extends EventEmitter {
   setEffectIndex(index: number): void {
     const name = index <= 1 ? NORMAL_LIGHT : this.nameForIdentifier(index);
     this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
+    this.offEnforceUntil = 0;
     this.markLocalChange();
     // HomeKit doesn't guarantee whether Active or ActiveIdentifier arrives
     // first when an automation turns the light on with an effect selected.
@@ -512,6 +614,7 @@ export class GoveeDevice extends EventEmitter {
     };
     this.log.debug(`[${this.config.name}] Captured snapshot before alert: ${JSON.stringify(this.snapshot)}`);
 
+    this.offEnforceUntil = 0;
     this.markLocalChange();
     this.state.isOn = true;
     this.state.mode = 'rgb';
@@ -537,6 +640,9 @@ export class GoveeDevice extends EventEmitter {
       return;
     }
 
+    if (snap.isOn) {
+      this.offEnforceUntil = 0;
+    }
     this.markLocalChange();
     this.state.isOn = snap.isOn;
     this.state.mode = snap.mode;

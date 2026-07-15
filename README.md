@@ -222,19 +222,33 @@ inside the plugin the moment the switch is toggled.
   and is automatically suppressed while an effect is active (a
   color-temperature update received while in effect mode is ignored rather
   than cancelling the effect).
-- **Adaptive Lighting vs. the physical power button**: HAP-NodeJS's
-  Adaptive Lighting controller keeps firing its periodic color-temperature
-  nudges on a fixed schedule even while the light is off, and after a press
-  of the light's own physical button the "off" report takes a few seconds
-  to travel Govee's cloud → gv2mqtt → this plugin — during which the cached
-  state still says "on". A nudge landing in that window used to get
-  published and (because gv2mqtt maps it onto Govee API calls that wake the
-  lamp) turn the light right back on. Two guards prevent that now: nudge
-  publishes are deferred ~5s and re-checked against the latest known state
-  before actually being sent (a deliberate slider drag by the user is still
-  sent immediately — only the automatic background nudges are deferred),
-  and if an "off" report arrives shortly after a nudge was already
-  published anyway, the plugin re-asserts the off so the button press wins.
+- **Adaptive Lighting vs. the physical power button**: while Adaptive
+  Lighting is active, a color-temperature command goes out roughly once a
+  minute (HAP-NodeJS's controller keeps firing them on its fixed schedule
+  even while the light is off — it never checks the On state), so a press
+  of the light's own physical button always competes with recent commands:
+  our cached state stays stale-"on" for the few seconds the off report
+  needs to travel Govee's cloud → gv2mqtt → us, and Govee's cloud has also
+  been observed to settle an *already-delivered* command a few seconds
+  late, relighting a lamp that was just switched off. gv2mqtt maps any
+  color-temp command onto Govee API calls that wake the lamp, so either
+  race used to turn the light right back on. Guards, in order:
+  - AL nudges are **deferred ~5s and re-checked** against the latest known
+    state before being sent (a deliberate slider drag by the user is still
+    sent immediately — only automatic background nudges are deferred), and
+    **skipped entirely when the drift since the last sent value is under 5
+    mireds** — imperceptible, and every skipped command is one less thing
+    in Govee's pipeline for a button press to race.
+  - If an "off" report still arrives shortly after a nudge was published,
+    the plugin **re-asserts the off** so the button press wins.
+  - For ~30s after an out-of-band "off" that arrived during active AL
+    nudging, an unsolicited "on" report that no HomeKit action asked for
+    is **answered with an OFF command** (up to 3 times) instead of being
+    accepted — this is what beats Govee's late server-side settling, which
+    needs no further input from the plugin to relight the lamp. Any real
+    power-on through HomeKit disarms this watchdog instantly; a genuine
+    out-of-band power-on (Govee app, pressing the button back on within
+    that half-minute) can be fought at most 3 times and then wins.
   Nudges are also sent without a redundant `brightness` field, halving the
   Govee API calls gv2mqtt makes per nudge.
 - **Real effect list per device** (needs `refreshStateOnConnect`, default
