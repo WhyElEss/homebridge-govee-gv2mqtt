@@ -49,7 +49,17 @@ export class LightAccessory {
       .getCharacteristic(Characteristic.ColorTemperature)
       .setProps({ minValue: device.config.minMireds, maxValue: device.config.maxMireds })
       .onGet(() => this.device.getState().mireds)
-      .onSet((value) => this.device.setColorTemperature(value as number));
+      // AdaptiveLightingController invokes this SET handler directly (with
+      // `{ controller, omitEventUpdate }` as the context argument) for its
+      // periodic nudges - and keeps doing so even while the light is off.
+      // Writes coming from HomeKit itself (user dragging the temperature
+      // slider) arrive without that context, so this is how GoveeDevice
+      // tells an automatic background nudge apart from a deliberate change.
+      .onSet((value, context) => {
+        const fromAdaptiveLighting =
+          typeof context === 'object' && context !== null && 'controller' in context;
+        this.device.setColorTemperature(value as number, fromAdaptiveLighting);
+      });
 
     if (device.config.adaptiveLighting) {
       // getService()/addService() are typed to return the generic `Service` base

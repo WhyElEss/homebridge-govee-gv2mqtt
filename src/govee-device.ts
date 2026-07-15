@@ -45,6 +45,29 @@ interface DiscoveryConfigMessage {
   effect_list?: unknown;
 }
 
+/**
+ * How long to sit on an Adaptive Lighting color-temperature nudge before
+ * actually publishing it. AL's nudges arrive on a fixed schedule regardless
+ * of the light's real power state (HAP-NodeJS keeps calling the SET handler
+ * even while the light is off), so when the light gets switched off by its
+ * physical button, a nudge can fire inside the few seconds it takes the
+ * "off" report to travel Govee's cloud -> gv2mqtt -> us, while our cached
+ * isOn is still stale-true - and gv2mqtt maps the resulting command onto
+ * Govee API calls that power the lamp back on. AL drifts a few mireds a
+ * minute, so delaying a nudge is invisible; it gives the "off" report time
+ * to land first, at which point the re-check below drops the nudge.
+ */
+const AL_PUBLISH_DELAY_MS = 5000;
+
+/**
+ * Backstop for the race AL_PUBLISH_DELAY_MS narrows but can't close (an
+ * "off" report that takes longer than the delay to arrive): if the device
+ * reports "off" within this window after we published an AL nudge, the
+ * nudge probably raced a physical power-off and woke the lamp back up, so
+ * re-assert the off.
+ */
+const AL_OFF_REASSERT_WINDOW_MS = 20000;
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -68,6 +91,8 @@ export class GoveeDevice extends EventEmitter {
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
   private hueSatFlushTimer?: NodeJS.Timeout;
   private effectReassertTimer?: NodeJS.Timeout;
+  private alPublishTimer?: NodeJS.Timeout;
+  private lastAlCommandAt = 0;
   private snapshot: StateSnapshot | null = null;
 
   /**
@@ -165,6 +190,21 @@ export class GoveeDevice extends EventEmitter {
     }
 
     this.state.isOn = msg.state === 'ON';
+    if (!this.state.isOn && Date.now() - this.lastAlCommandAt < AL_OFF_REASSERT_WINDOW_MS) {
+      // The device reports "off" moments after we published an Adaptive
+      // Lighting nudge - almost certainly the light was just powered off
+      // physically (its button) and our automatic nudge raced that through
+      // Govee's cloud. gv2mqtt maps a color-temperature command onto Govee
+      // API calls that wake the lamp back up, so re-assert the off the user
+      // asked for with the button. Never triggered by deliberate HomeKit
+      // changes - lastAlCommandAt is only ever set by AL's background nudges.
+      this.lastAlCommandAt = 0;
+      this.log.debug(
+        `[${this.config.name}] Device reported OFF right after an Adaptive Lighting nudge; ` +
+          're-asserting OFF in case the nudge woke it back up',
+      );
+      this.publish({ state: 'OFF' });
+    }
     if (!this.state.isOn && !this.withinOptimisticWindow()) {
       // Only trust an "off" report enough to reset mode/effect bookkeeping
       // once we're past the optimistic window. gv2mqtt/Govee's cloud can
@@ -303,15 +343,45 @@ export class GoveeDevice extends EventEmitter {
     this.emit('change', this.getState());
   }
 
-  setColorTemperature(mireds: number): void {
+  setColorTemperature(mireds: number, fromAdaptiveLighting = false): void {
     this.log.debug(
-      `[${this.config.name}] setColorTemperature(${Math.round(mireds)}) - isOn=${this.state.isOn}, mode=${this.state.mode}`,
+      `[${this.config.name}] setColorTemperature(${Math.round(mireds)}) - isOn=${this.state.isOn}, ` +
+        `mode=${this.state.mode}, fromAdaptiveLighting=${fromAdaptiveLighting}`,
     );
-    this.markLocalChange();
     this.state.mireds = Math.round(mireds);
     if (!this.state.isOn || this.state.mode === 'effect') {
       return;
     }
+
+    if (fromAdaptiveLighting) {
+      // Background nudge, not a deliberate user change: publish deferred
+      // (see AL_PUBLISH_DELAY_MS), re-checking the state right before
+      // sending so a nudge scheduled while the light looked on gets dropped
+      // once a physical "off" report (or an effect/alert activation) lands
+      // in the meantime. Also sent without a brightness field - the nudge
+      // doesn't change brightness, and including it would make gv2mqtt issue
+      // a second, pointless Govee API call every tick.
+      if (this.alPublishTimer) {
+        clearTimeout(this.alPublishTimer);
+      }
+      this.alPublishTimer = setTimeout(() => {
+        this.alPublishTimer = undefined;
+        if (!this.state.isOn || this.state.mode !== 'adaptive') {
+          this.log.debug(
+            `[${this.config.name}] Dropping deferred Adaptive Lighting nudge - ` +
+              `isOn=${this.state.isOn}, mode=${this.state.mode}`,
+          );
+          return;
+        }
+        this.markLocalChange();
+        this.lastAlCommandAt = Date.now();
+        this.publish({ state: 'ON', color_temp: this.state.mireds });
+      }, AL_PUBLISH_DELAY_MS);
+      this.emit('change', this.getState());
+      return;
+    }
+
+    this.markLocalChange();
     this.state.mode = 'adaptive';
     this.publish({ state: 'ON', color_temp: this.state.mireds, brightness: this.state.brightness });
     this.emit('change', this.getState());

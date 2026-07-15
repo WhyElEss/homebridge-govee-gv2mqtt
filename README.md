@@ -222,6 +222,21 @@ inside the plugin the moment the switch is toggled.
   and is automatically suppressed while an effect is active (a
   color-temperature update received while in effect mode is ignored rather
   than cancelling the effect).
+- **Adaptive Lighting vs. the physical power button**: HAP-NodeJS's
+  Adaptive Lighting controller keeps firing its periodic color-temperature
+  nudges on a fixed schedule even while the light is off, and after a press
+  of the light's own physical button the "off" report takes a few seconds
+  to travel Govee's cloud → gv2mqtt → this plugin — during which the cached
+  state still says "on". A nudge landing in that window used to get
+  published and (because gv2mqtt maps it onto Govee API calls that wake the
+  lamp) turn the light right back on. Two guards prevent that now: nudge
+  publishes are deferred ~5s and re-checked against the latest known state
+  before actually being sent (a deliberate slider drag by the user is still
+  sent immediately — only the automatic background nudges are deferred),
+  and if an "off" report arrives shortly after a nudge was already
+  published anyway, the plugin re-asserts the off so the button press wins.
+  Nudges are also sent without a redundant `brightness` field, halving the
+  Govee API calls gv2mqtt makes per nudge.
 - **Real effect list per device** (needs `refreshStateOnConnect`, default
   `true`): gv2mqtt fetches each device's actual supported scenes from
   Govee's official Platform API (per the exact SKU of that model) plus that
