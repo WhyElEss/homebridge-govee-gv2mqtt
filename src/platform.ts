@@ -22,6 +22,7 @@ import { GoveeDevice } from './govee-device';
 import { LightAccessory } from './light-accessory';
 import { EffectsAccessory } from './effects-accessory';
 import { AlertAccessory } from './alert-accessory';
+import { CustomEffectsAccessory } from './custom-effects-accessory';
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -272,6 +273,22 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         (accessory) => new AlertAccessory(this, accessory, device),
       );
     }
+
+    if (resolved.enableCustomEffects) {
+      if (resolved.lanIp) {
+        this.addOrRestoreAccessory(
+          `${resolved.deviceId}-custom-effects`,
+          `${resolved.name} Custom Effects`,
+          this.api.hap.Categories.SWITCH,
+          (accessory) => new CustomEffectsAccessory(this, accessory, device),
+        );
+      } else {
+        this.log.warn(
+          `[${resolved.name}] enableCustomEffects is on but lanIp is not set; ` +
+            'the Custom Effects accessory needs the lamp\'s local IP address to work, so it is not exposed.',
+        );
+      }
+    }
   }
 
   private addOrRestoreAccessory(
@@ -311,6 +328,9 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       }
       if (cfg?.enableAlert ?? false) {
         expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-alert`));
+      }
+      if ((cfg?.enableCustomEffects ?? false) && cfg?.lanIp) {
+        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-custom-effects`));
       }
     }
 

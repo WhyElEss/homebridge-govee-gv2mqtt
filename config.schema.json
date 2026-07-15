@@ -158,6 +158,18 @@
               "default": 100,
               "minimum": 0,
               "maximum": 100
+            },
+            "enableCustomEffects": {
+              "title": "Expose Custom Effects (H6022 only)",
+              "type": "boolean",
+              "default": false,
+              "description": "Adds a \"<name> Custom Effects\" accessory with two switches - \"Police Strobo\" and \"Гроза в банке\" - sent to the lamp directly over the local network (not through Govee's cloud). Only works on the Table Lamp 2 (H6022); activation is refused for any other model. Requires \"Lamp LAN IP\" below and the lamp's LAN Control toggle enabled in the Govee Home app (Device Settings)."
+            },
+            "lanIp": {
+              "title": "Lamp LAN IP",
+              "type": "string",
+              "placeholder": "192.168.1.50",
+              "description": "The lamp's local IP address, used only by Custom Effects. Give the lamp a DHCP reservation on your router so it doesn't change."
             }
           }
         }
@@ -193,7 +205,9 @@
         "devices[].enableAlert",
         "devices[].alertHue",
         "devices[].alertSaturation",
-        "devices[].alertBrightness"
+        "devices[].alertBrightness",
+        "devices[].enableCustomEffects",
+        "devices[].lanIp"
       ]
     }
   ]

@@ -20,6 +20,18 @@ export interface GoveeDeviceState {
   effectNames: string[];
   /** Whether triggerAlert() has been called without a matching restoreSnapshot() yet. */
   alertActive: boolean;
+  /**
+   * The device model (e.g. "H6022") as reported by gv2mqtt's Home Assistant
+   * discovery config; null until the first discovery message arrives.
+   */
+  sku: string | null;
+  /**
+   * Name of the LAN-driven custom effect currently running (see
+   * CustomEffectsAccessory), or null. While set, device state reports from
+   * gv2mqtt don't reinterpret mode/effect - the lamp is being driven out of
+   * band over UDP and gv2mqtt's view of it is not meaningful.
+   */
+  customEffect: string | null;
 }
 
 interface StateSnapshot {
@@ -43,6 +55,8 @@ interface IncomingMessage {
 
 interface DiscoveryConfigMessage {
   effect_list?: unknown;
+  /** gv2mqtt fills device.model with the Govee SKU (hass_mqtt/base.rs: model = device.sku). */
+  device?: { model?: unknown };
 }
 
 /**
@@ -109,6 +123,8 @@ const DEFAULT_STATE: GoveeDeviceState = {
   effectIndex: 1,
   effectNames: buildEffectNames(null),
   alertActive: false,
+  sku: null,
+  customEffect: null,
 };
 
 /**
@@ -205,6 +221,11 @@ export class GoveeDevice extends EventEmitter {
   }
 
   private publish(payload: Record<string, unknown>): void {
+    // Any MQTT command means gv2mqtt is driving the lamp again, which ends a
+    // LAN-driven custom effect. Cleared silently: every path that publishes
+    // as part of a user-visible change emits 'change' itself afterwards, and
+    // CustomEffectsAccessory stops its strobe timer on that event.
+    this.state.customEffect = null;
     if (typeof payload.color_temp === 'number') {
       // Remember the last color temperature actually sent to the device, so
       // deferred AL nudges can skip re-sending an imperceptible change.
@@ -354,6 +375,24 @@ export class GoveeDevice extends EventEmitter {
       // still reflect isOn honestly either way, but don't let a blip like
       // that wipe out an effect selection that was just made.
       this.resetToNormalLight();
+      // A trusted "off" (e.g. the lamp's physical button) also ends a
+      // LAN-driven custom effect; CustomEffectsAccessory stops its strobe
+      // timer on the resulting 'change' event, so the lamp stays off
+      // instead of being relit by the next timer tick.
+      this.state.customEffect = null;
+    }
+
+    if (this.state.customEffect) {
+      // A LAN-driven custom effect is running: the lamp shows a DIY scene
+      // (or a plugin-driven strobe) that gv2mqtt knows nothing about, so
+      // don't let its mode/effect interpretation of the report overwrite
+      // ours. In particular, flipping mode back to 'adaptive' here would
+      // re-enable Adaptive Lighting nudges, whose color-temp commands would
+      // silently kill the running effect minutes later.
+      if (typeof msg.brightness === 'number') {
+        this.state.brightness = msg.brightness;
+      }
+      return;
     }
 
     if (this.state.isOn && !this.withinOptimisticWindow()) {
@@ -400,17 +439,35 @@ export class GoveeDevice extends EventEmitter {
       this.log.warn(`[${this.config.name}] ignoring unparseable discovery config payload`);
       return;
     }
-    if (!Array.isArray(cfg.effect_list)) {
-      return;
+
+    let changed = false;
+
+    const model = cfg.device?.model;
+    if (typeof model === 'string' && model.length > 0 && model !== this.state.sku) {
+      this.state.sku = model;
+      this.log.info(`[${this.config.name}] Discovered device model ${model} from gv2mqtt`);
+      changed = true;
     }
-    const names = cfg.effect_list.filter((n): n is string => typeof n === 'string' && n.length > 0);
+
+    changed = this.applyDiscoveredEffectList(cfg.effect_list) || changed;
+
+    if (changed) {
+      this.emit('change', this.getState());
+    }
+  }
+
+  private applyDiscoveredEffectList(effectList: unknown): boolean {
+    if (!Array.isArray(effectList)) {
+      return false;
+    }
+    const names = effectList.filter((n): n is string => typeof n === 'string' && n.length > 0);
     if (names.length === 0) {
-      return;
+      return false;
     }
 
     const current = this.state.effectNames.slice(1);
     if (current.length === names.length && current.every((n, i) => n === names[i])) {
-      return;
+      return false;
     }
 
     this.state.effectNames = buildEffectNames(names);
@@ -418,7 +475,7 @@ export class GoveeDevice extends EventEmitter {
       this.identifierForName(effectName);
     }
     this.log.info(`[${this.config.name}] Discovered ${names.length} real effect(s) from gv2mqtt`);
-    this.emit('change', this.getState());
+    return true;
   }
 
   setOn(on: boolean): void {
@@ -653,8 +710,14 @@ export class GoveeDevice extends EventEmitter {
    * wheel), since an alert color is a deliberate, explicit choice.
    */
   triggerAlert(hue: number, saturation: number, brightness: number): void {
-    this.snapshot = this.captureSnapshot();
-    this.log.debug(`[${this.config.name}] Captured snapshot before alert: ${JSON.stringify(this.snapshot)}`);
+    if (!this.state.alertActive && !this.state.customEffect) {
+      // Only snapshot the lamp's "real" state: re-snapshotting while an
+      // alert or a LAN-driven custom effect is already overriding it would
+      // capture the override itself, and restoreSnapshot() would then
+      // "restore" to that instead of to what the user actually had.
+      this.snapshot = this.captureSnapshot();
+      this.log.debug(`[${this.config.name}] Captured snapshot before alert: ${JSON.stringify(this.snapshot)}`);
+    }
 
     this.disarmOffWatchdog();
     this.markLocalChange();
@@ -674,11 +737,45 @@ export class GoveeDevice extends EventEmitter {
     return { isOn, mode, mireds, hue, saturation, brightness, effectIndex };
   }
 
+  /**
+   * Starts a LAN-driven custom effect (see CustomEffectsAccessory): captures
+   * a restore snapshot like triggerAlert() does, marks the lamp on, and
+   * blocks Adaptive Lighting / report reinterpretation from fighting the
+   * effect (mode 'effect' + state.customEffect - see applyReportedState).
+   * The actual UDP commands are the caller's job; this only owns state.
+   */
+  startCustomEffect(name: string): void {
+    this.log.debug(`[${this.config.name}] startCustomEffect("${name}")`);
+    if (!this.state.alertActive && !this.state.customEffect) {
+      this.snapshot = this.captureSnapshot();
+      this.log.debug(`[${this.config.name}] Captured snapshot before custom effect: ${JSON.stringify(this.snapshot)}`);
+    }
+    this.disarmOffWatchdog();
+    this.markLocalChange();
+    this.state.isOn = true;
+    this.state.mode = 'effect';
+    this.state.effectIndex = 1;
+    this.state.alertActive = false;
+    this.state.customEffect = name;
+    this.emit('change', this.getState());
+  }
+
+  /** Reverses startCustomEffect(), restoring whatever was snapshotted, over MQTT. */
+  stopCustomEffect(): void {
+    if (!this.state.customEffect) {
+      return;
+    }
+    this.log.debug(`[${this.config.name}] stopCustomEffect() - was "${this.state.customEffect}"`);
+    this.state.customEffect = null;
+    this.restoreSnapshot();
+  }
+
   /** Reverses triggerAlert(), reapplying whatever was captured - including a specific effect. */
   restoreSnapshot(): void {
     const snap = this.snapshot;
     this.snapshot = null;
     this.state.alertActive = false;
+    this.state.customEffect = null;
 
     if (!snap) {
       this.log.warn(`[${this.config.name}] restoreSnapshot() called with no prior snapshot; leaving state as-is.`);

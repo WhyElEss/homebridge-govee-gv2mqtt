@@ -24,6 +24,15 @@ export interface DeviceConfig {
   alertHue?: number;
   alertSaturation?: number;
   alertBrightness?: number;
+  /**
+   * Exposes a "<name> Custom Effects" accessory with LAN-driven effects
+   * (Police Strobo, Гроза в банке). H6022 (Table Lamp 2) only - activation
+   * is refused for any other model. Requires lanIp and the lamp's "LAN
+   * Control" toggle enabled in the Govee Home app.
+   */
+  enableCustomEffects?: boolean;
+  /** The lamp's local IP address (give it a DHCP reservation on the router). */
+  lanIp?: string;
 }
 
 export interface GoveePlatformConfig extends PlatformConfig {
@@ -87,6 +96,8 @@ export interface ResolvedDeviceConfig {
   alertHue: number;
   alertSaturation: number;
   alertBrightness: number;
+  enableCustomEffects: boolean;
+  lanIp: string;
   stateTopic: string;
   commandTopic: string;
   discoveryConfigTopic: string;
@@ -112,6 +123,8 @@ export function resolveDeviceConfig(
     alertHue: device.alertHue ?? 0,
     alertSaturation: device.alertSaturation ?? 100,
     alertBrightness: device.alertBrightness ?? 100,
+    enableCustomEffects: device.enableCustomEffects ?? false,
+    lanIp: device.lanIp ?? '',
     stateTopic: `${topicPrefix}/${device.deviceId}/state`,
     commandTopic: `${topicPrefix}/${device.deviceId}/command`,
     // gv2mqtt's Home Assistant MQTT discovery config topic for this device's

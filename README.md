@@ -23,6 +23,10 @@ on the Table Lamp 2's effects — is used only for the first ~15s after a
 restart, before that device's real list has been discovered, or if discovery
 never arrives for some reason. It's a stopgap, not a source of truth.
 
+The one model-specific feature is the optional
+[Custom Effects](#custom-effects-h6022-only-police-strobo--гроза-в-банке)
+accessory, which is H6022-only by design.
+
 ## What each accessory does
 
 For every known device the platform creates:
@@ -42,8 +46,14 @@ For every known device the platform creates:
 - **`<name> Alert`** — an optional Switch accessory (`enableAlert: true`) for
   "flash this light, then put it back exactly how it was" automations. See
   [Alert switch](#alert-switch-flash-and-restore-for-automations) below.
+- **`<name> Custom Effects`** — an optional accessory
+  (`enableCustomEffects: true` + `lanIp`, **H6022 Table Lamp 2 only**) with
+  two switches for effects Govee's cloud API can't express, sent to the lamp
+  directly over the local network. See
+  [Custom effects](#custom-effects-h6022-only-police-strobo--гроза-в-банке)
+  below.
 
-Both accessories for a device share one `GoveeDevice` instance
+All accessories for a device share one `GoveeDevice` instance
 ([src/govee-device.ts](src/govee-device.ts)) that owns all MQTT
 subscription/publish logic and cached state for that physical light.
 
@@ -200,6 +210,61 @@ single-action Home app automations built on a door/contact sensor:
 Each automation only ever does one thing (flip one switch), so there's
 nothing to sequence or wait on — the snapshot/restore logic all happens
 inside the plugin the moment the switch is toggled.
+
+## Custom effects (H6022 only): Police Strobo / Гроза в банке
+
+Set `enableCustomEffects: true` **and** `lanIp` on a device to get a
+`<name> Custom Effects` accessory with two switches. These effects are
+inspired by the GyverLamp firmware and can't be expressed through
+gv2mqtt/Govee's cloud API, so the plugin sends them straight to the lamp
+over the local network (UDP port 4003, the same LAN API gv2mqtt itself
+uses for local control):
+
+- **Police Strobo** — the whole lamp strobes red/blue (400ms per color).
+  Driven by a plugin-side timer sending plain LAN color commands, so it
+  runs entirely locally with no cloud round-trips.
+- **Гроза в банке** — a storm-cloud scene: a gray twinkling cloud across the
+  top two LED rows, blue raindrops falling down the lamp's 11×12 LED matrix,
+  and white lightning flickering below the cloud. Uploaded once as a custom
+  DIY "matrix scene"; the lamp's own firmware animates it from there.
+
+Turning a switch **on** snapshots the lamp's current state (exactly like the
+Alert switch) and starts the effect; turning it **off** restores the
+snapshot. The two switches are mutually exclusive — starting one stops the
+other. Changing the light through HomeKit (color, brightness, an effect from
+the Effects accessory) also ends the custom effect, as does turning the lamp
+off with its physical button.
+
+Requirements and caveats:
+
+- **H6022 (Table Lamp 2) only.** The DIY matrix-scene byte format is
+  specific to this model, so the switches refuse to activate until gv2mqtt's
+  MQTT discovery confirms the device model is `H6022` (a warning is logged
+  otherwise).
+- **LAN Control must be enabled** for the lamp in the Govee Home app
+  (Device Settings → LAN Control), and `lanIp` must be the lamp's local IP —
+  give it a DHCP reservation on your router.
+- The LAN protocol is fire-and-forget UDP: the plugin can't confirm the lamp
+  received a command. If a switch turns on but the lamp doesn't react, check
+  LAN Control, the IP address, and that UDP traffic can reach the lamp from
+  the Homebridge container.
+
+```json
+{
+  "name": "Govee Table Lamp",
+  "deviceId": "18DFD0C806467677",
+  "enableCustomEffects": true,
+  "lanIp": "192.168.2.50"
+}
+```
+
+The matrix-scene encoding is a TypeScript port of
+[dvdavd/govee-lan-ha](https://github.com/dvdavd/govee-lan-ha)'s
+`govee_scene.py` (H6022 scene profile, scene code 8505), which builds on
+[AlgoClaw/Govee](https://github.com/AlgoClaw/Govee) and
+[egold555/Govee-Reverse-Engineering](https://github.com/egold555/Govee-Reverse-Engineering);
+the LAN command JSON shapes (`colorwc`, `ptReal`) match
+[govee2mqtt](https://github.com/wez/govee2mqtt)'s `lan_api.rs`.
 
 ## Behavior notes
 
