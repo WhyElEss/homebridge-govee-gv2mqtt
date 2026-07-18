@@ -218,10 +218,23 @@ inside the plugin the moment the switch is toggled.
   color-temperature command (low saturation → treated as "white") or a
   true RGB color command.
 - **Adaptive Lighting** requires the Home Hub to be on iOS 13+/aligned
-  hardware; it's controlled per-device via `adaptiveLighting` in config,
-  and is automatically suppressed while an effect is active (a
-  color-temperature update received while in effect mode is ignored rather
-  than cancelling the effect).
+  hardware; it's controlled per-device via `adaptiveLighting` in config.
+  While an effect is active, only AL's **background** color-temperature
+  writes are suppressed (so the periodic nudges don't silently cancel a
+  running effect). Every **deliberate** way of leaving an effect works:
+  - a scene/automation that sets the lamp to **Adaptive Lighting** — iOS
+    (re)writes the AL transition on scene recall, which the plugin observes
+    via the `ActiveTransitionCount` characteristic and treats the
+    controller's immediately-following color-temperature write as the
+    activation rather than a background nudge (in HAP-NodeJS's AUTOMATIC
+    controller mode this is the only observable signal; the caveat is that
+    a Home-Hub-initiated background refresh of the AL curve is
+    indistinguishable and would also drop a then-running effect back to
+    normal light);
+  - a scene or slider with a **fixed color temperature or white**;
+  - a **saturated color** from the color wheel or a scene;
+  - a real **brightness change**;
+  - selecting the **"Normal Light"** input on the Effects accessory.
 - **Adaptive Lighting vs. the physical power button**: while Adaptive
   Lighting is active, a color-temperature command goes out roughly once a
   minute (HAP-NodeJS's controller keeps firing them on its fixed schedule

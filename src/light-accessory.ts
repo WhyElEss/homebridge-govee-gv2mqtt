@@ -68,6 +68,24 @@ export class LightAccessory {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const controller = new this.platform.api.hap.AdaptiveLightingController(this.service as any);
       accessory.configureController(controller);
+
+      // In the controller's AUTOMATIC mode HAP-NodeJS emits no event when
+      // iOS (re)writes the transition (the UPDATE event exists only in
+      // MANUAL mode), but handleActiveTransitionUpdated always pushes a "1"
+      // through ActiveTransitionCount via sendEventNotification - which
+      // does emit an observable CHANGE event. That's the only available
+      // signal that a scene/automation just deliberately (re)enabled
+      // Adaptive Lighting, as opposed to the background color-temperature
+      // nudges the controller keeps firing regardless of the lamp's mode.
+      // A transition restored from cache at startup sets the value directly
+      // without a notification, so this can't fire spuriously on boot.
+      this.service
+        .getCharacteristic(Characteristic.CharacteristicValueActiveTransitionCount)
+        .on('change', (change) => {
+          if (change.newValue) {
+            this.device.noteAdaptiveLightingConfigured();
+          }
+        });
     }
 
     device.on('change', (state) => {

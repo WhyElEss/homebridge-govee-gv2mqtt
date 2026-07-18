@@ -99,6 +99,16 @@ const OFF_ENFORCE_MAX_REASSERTS = 3;
  */
 const AL_MIN_NUDGE_DELTA_MIREDS = 5;
 
+/**
+ * A controller-context color-temperature write arriving within this window
+ * after an Adaptive Lighting transition was (re)written by iOS (see
+ * noteAdaptiveLightingConfigured) is the immediate, synchronous follow-up
+ * of that (re)configuration - i.e. a scene/automation deliberately
+ * switching the lamp (back) to Adaptive Lighting - not one of the
+ * background minute-ticks the controller keeps firing regardless of mode.
+ */
+const AL_ACTIVATION_WINDOW_MS = 5000;
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -124,6 +134,7 @@ export class GoveeDevice extends EventEmitter {
   private effectReassertTimer?: NodeJS.Timeout;
   private alPublishTimer?: NodeJS.Timeout;
   private lastAlCommandAt = 0;
+  private lastAlConfiguredAt = 0;
   private lastSentMireds = -1;
   private offEnforceUntil = 0;
   private offEnforceAttempts = 0;
@@ -198,6 +209,21 @@ export class GoveeDevice extends EventEmitter {
   /** Reverse of identifierForName; undefined if that identifier hasn't been assigned yet. */
   nameForIdentifier(id: number): string | undefined {
     return this.nameByIdentifier.get(id);
+  }
+
+  /**
+   * Called by LightAccessory whenever iOS (re)writes the Adaptive Lighting
+   * transition (observed via the ActiveTransitionCount characteristic's
+   * change event) - the only signal, in the controller's AUTOMATIC mode,
+   * that a scene/automation just deliberately turned Adaptive Lighting on
+   * for this lamp. The controller synchronously follows the (re)write with
+   * a color-temperature SET; setColorTemperature uses this timestamp to
+   * tell that deliberate activation apart from a background nudge and exit
+   * an active effect/color mode for it.
+   */
+  noteAdaptiveLightingConfigured(): void {
+    this.lastAlConfiguredAt = Date.now();
+    this.log.debug(`[${this.config.name}] Adaptive Lighting transition (re)configured by a controller`);
   }
 
   private withinOptimisticWindow(): boolean {
@@ -501,55 +527,82 @@ export class GoveeDevice extends EventEmitter {
         `mode=${this.state.mode}, fromAdaptiveLighting=${fromAdaptiveLighting}`,
     );
     this.state.mireds = Math.round(mireds);
-    if (!this.state.isOn || this.state.mode === 'effect') {
+    if (!this.state.isOn) {
       return;
     }
 
-    if (fromAdaptiveLighting) {
-      // Background nudge, not a deliberate user change: publish deferred
-      // (see AL_PUBLISH_DELAY_MS), re-checking the state right before
-      // sending so a nudge scheduled while the light looked on gets dropped
-      // once a physical "off" report (or an effect/alert activation) lands
-      // in the meantime. Also sent without a brightness field - the nudge
-      // doesn't change brightness, and including it would make gv2mqtt issue
-      // a second, pointless Govee API call every tick.
-      if (this.alPublishTimer) {
-        clearTimeout(this.alPublishTimer);
-      }
-      this.alPublishTimer = setTimeout(() => {
-        this.alPublishTimer = undefined;
-        if (!this.state.isOn || this.state.mode !== 'adaptive') {
-          this.log.debug(
-            `[${this.config.name}] Dropping deferred Adaptive Lighting nudge - ` +
-              `isOn=${this.state.isOn}, mode=${this.state.mode}`,
-          );
-          return;
-        }
-        if (
-          this.lastSentMireds >= 0 &&
-          Math.abs(this.state.mireds - this.lastSentMireds) < AL_MIN_NUDGE_DELTA_MIREDS
-        ) {
-          // Imperceptible drift since the last color_temp we actually sent;
-          // skip the command entirely. The fewer commands sit in Govee's
-          // cloud pipeline, the fewer chances a physical button press has
-          // to race one of them.
-          this.log.debug(
-            `[${this.config.name}] Skipping Adaptive Lighting nudge - ` +
-              `${this.state.mireds} mireds is within ${AL_MIN_NUDGE_DELTA_MIREDS} of last-sent ${this.lastSentMireds}`,
-          );
-          return;
-        }
-        this.markLocalChange();
-        this.lastAlCommandAt = Date.now();
-        this.publishColorTemp(this.state.mireds);
-      }, AL_PUBLISH_DELAY_MS);
+    if (!fromAdaptiveLighting) {
+      // A deliberate write - Home's temperature slider, a scene with a
+      // stored color temperature, Siri. Applies unconditionally, pulling
+      // the lamp out of an active effect if one is running; only Adaptive
+      // Lighting's automatic background writes get the mode checks below.
+      this.markLocalChange();
+      this.resetToNormalLight();
+      this.publishColorTemp(this.state.mireds, this.state.brightness);
       this.emit('change', this.getState());
       return;
     }
 
-    this.markLocalChange();
-    this.state.mode = 'adaptive';
-    this.publishColorTemp(this.state.mireds, this.state.brightness);
+    if (this.state.mode !== 'adaptive') {
+      if (Date.now() - this.lastAlConfiguredAt < AL_ACTIVATION_WINDOW_MS) {
+        // This controller write is the synchronous follow-up of an Adaptive
+        // Lighting transition just (re)written by iOS (see
+        // noteAdaptiveLightingConfigured): a scene/automation deliberately
+        // switched this lamp back to Adaptive Lighting. Exit the effect or
+        // color mode for it instead of suppressing the write like a
+        // background nudge.
+        this.log.debug(
+          `[${this.config.name}] Adaptive Lighting freshly (re)configured - leaving ${this.state.mode} mode for it`,
+        );
+        this.markLocalChange();
+        this.resetToNormalLight();
+        this.publishColorTemp(this.state.mireds, this.state.brightness);
+        this.emit('change', this.getState());
+      } else {
+        this.log.debug(
+          `[${this.config.name}] Ignoring background Adaptive Lighting write while in ${this.state.mode} mode`,
+        );
+      }
+      return;
+    }
+
+    // Background nudge while already in plain adaptive mode: publish
+    // deferred (see AL_PUBLISH_DELAY_MS), re-checking the state right
+    // before sending so a nudge scheduled while the light looked on gets
+    // dropped once a physical "off" report (or an effect/alert activation)
+    // lands in the meantime. Also sent without a brightness field - the
+    // nudge doesn't change brightness, and including it would make gv2mqtt
+    // issue a second, pointless Govee API call every tick.
+    if (this.alPublishTimer) {
+      clearTimeout(this.alPublishTimer);
+    }
+    this.alPublishTimer = setTimeout(() => {
+      this.alPublishTimer = undefined;
+      if (!this.state.isOn || this.state.mode !== 'adaptive') {
+        this.log.debug(
+          `[${this.config.name}] Dropping deferred Adaptive Lighting nudge - ` +
+            `isOn=${this.state.isOn}, mode=${this.state.mode}`,
+        );
+        return;
+      }
+      if (
+        this.lastSentMireds >= 0 &&
+        Math.abs(this.state.mireds - this.lastSentMireds) < AL_MIN_NUDGE_DELTA_MIREDS
+      ) {
+        // Imperceptible drift since the last color_temp we actually sent;
+        // skip the command entirely. The fewer commands sit in Govee's
+        // cloud pipeline, the fewer chances a physical button press has
+        // to race one of them.
+        this.log.debug(
+          `[${this.config.name}] Skipping Adaptive Lighting nudge - ` +
+            `${this.state.mireds} mireds is within ${AL_MIN_NUDGE_DELTA_MIREDS} of last-sent ${this.lastSentMireds}`,
+        );
+        return;
+      }
+      this.markLocalChange();
+      this.lastAlCommandAt = Date.now();
+      this.publishColorTemp(this.state.mireds);
+    }, AL_PUBLISH_DELAY_MS);
     this.emit('change', this.getState());
   }
 
@@ -601,13 +654,17 @@ export class GoveeDevice extends EventEmitter {
         Math.max(this.config.minMireds, Math.min(this.config.maxMireds, 500 - ratio * 390)),
       );
       this.state.mireds = mireds;
-      if (this.state.isOn && this.state.mode !== 'effect') {
-        this.state.mode = 'adaptive';
+      if (this.state.isOn) {
+        // A color-wheel write is always deliberate (user or a scene with a
+        // stored color) - it exits an active effect, same as a deliberate
+        // color-temperature write.
+        this.resetToNormalLight();
         this.publishColorTemp(mireds, bri);
       }
     } else {
       if (this.state.isOn) {
         this.state.mode = 'rgb';
+        this.state.effectIndex = 1;
         this.publishRgb({ r, g, b }, bri);
       }
     }
