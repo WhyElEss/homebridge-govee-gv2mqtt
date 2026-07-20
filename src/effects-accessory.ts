@@ -67,7 +67,7 @@ export class EffectsAccessory {
     this.service
       .getCharacteristic(Characteristic.Active)
       .onGet(() => (this.device.getState().isOn ? 1 : 0))
-      .onSet((value) => this.device.setOn(!!value));
+      .onSet((value) => this.device.setOn(!!value, 'tv'));
 
     this.service
       .getCharacteristic(Characteristic.ActiveIdentifier)

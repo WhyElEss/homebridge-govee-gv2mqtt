@@ -222,15 +222,24 @@ inside the plugin the moment the switch is toggled.
   While an effect is active, only AL's **background** color-temperature
   writes are suppressed (so the periodic nudges don't silently cancel a
   running effect). Every **deliberate** way of leaving an effect works:
-  - a scene/automation that sets the lamp to **Adaptive Lighting** — iOS
-    (re)writes the AL transition on scene recall, which the plugin observes
-    via the `ActiveTransitionCount` characteristic and treats the
-    controller's immediately-following color-temperature write as the
-    activation rather than a background nudge (in HAP-NodeJS's AUTOMATIC
-    controller mode this is the only observable signal; the caveat is that
-    a Home-Hub-initiated background refresh of the AL curve is
-    indistinguishable and would also drop a then-running effect back to
-    normal light);
+  - a scene/automation that sets the **Lightbulb** while an effect/color is
+    active — its (redundant) `On=true` write pulls the lamp back to normal
+    light, mirroring the original mqttthing config's semantics. This is
+    what makes "switch back to Adaptive Lighting" scenes reliable: their
+    power write always arrives, whereas iOS rewrites the AL transition on
+    scene recall only intermittently. Two exemptions keep this from
+    misfiring: the Effects accessory's own redundant `Active` write never
+    does this (HomeKit doesn't guarantee Active/ActiveIdentifier ordering,
+    so a TV "on" must never reset a just-selected effect), and an `On`
+    arriving within ~2s of a color/effect command we just published is
+    treated as part of the same scene batch (a color scene must not wipe
+    its own result when its writes arrive in the "wrong" order);
+  - the same AL-scene recall is *additionally* detected when iOS does
+    rewrite the AL transition (observed via the `ActiveTransitionCount`
+    characteristic — this also covers manually tapping the Adaptive
+    Lighting tile in the lamp's color picker, which writes no `On`; the
+    caveat is that a Home-Hub background refresh of the AL curve is
+    indistinguishable and would also drop a then-running effect);
   - a scene or slider with a **fixed color temperature or white**;
   - a **saturated color** from the color wheel or a scene;
   - a real **brightness change**;

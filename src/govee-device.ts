@@ -109,6 +109,18 @@ const AL_MIN_NUDGE_DELTA_MIREDS = 5;
  */
 const AL_ACTIVATION_WINDOW_MS = 5000;
 
+/**
+ * A scene delivers its characteristic writes as one near-simultaneous
+ * batch, with no guaranteed ordering. A redundant Lightbulb On=true that
+ * lands within this window of an effect/color command we just published is
+ * treated as part of the same scene batch (e.g. a color scene whose On
+ * write arrived after its Hue/Saturation writes) rather than as a
+ * standalone "switch back to normal light" signal - without this, a scene
+ * that sets a color or effect would wipe its own result whenever its On
+ * write happened to arrive last.
+ */
+const SCENE_BATCH_GRACE_MS = 2000;
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -135,6 +147,7 @@ export class GoveeDevice extends EventEmitter {
   private alPublishTimer?: NodeJS.Timeout;
   private lastAlCommandAt = 0;
   private lastAlConfiguredAt = 0;
+  private lastColorCommandAt = 0;
   private lastSentMireds = -1;
   private offEnforceUntil = 0;
   private offEnforceAttempts = 0;
@@ -274,10 +287,12 @@ export class GoveeDevice extends EventEmitter {
   }
 
   private publishRgb(color: RGB, brightness: number): void {
+    this.lastColorCommandAt = Date.now();
     this.publish({ state: 'ON', color, brightness });
   }
 
   private publishEffect(name: string): void {
+    this.lastColorCommandAt = Date.now();
     this.publish({ state: 'ON', effect: name });
   }
 
@@ -461,17 +476,42 @@ export class GoveeDevice extends EventEmitter {
     this.emit('change', this.getState());
   }
 
-  setOn(on: boolean): void {
+  setOn(on: boolean, source: 'lightbulb' | 'tv' = 'lightbulb'): void {
     const wasOn = this.state.isOn;
-    this.log.debug(`[${this.config.name}] setOn(${on}) - wasOn=${wasOn}, mode=${this.state.mode}`);
+    this.log.debug(`[${this.config.name}] setOn(${on}) from ${source} - wasOn=${wasOn}, mode=${this.state.mode}`);
 
     if (on && wasOn) {
-      // Already on - this is a redundant "on" (e.g. Adaptive Lighting
-      // re-asserting state a few seconds after the Lightbulb and Effects
-      // accessories' shared isOn flips to true, or Home resending state for
-      // any other reason), not a real off->on transition. Applying our
-      // normal "turn on" behavior here would reset an effect that was just
-      // selected via the Effects accessory back to Normal Light.
+      if (
+        source === 'lightbulb' &&
+        this.state.mode !== 'adaptive' &&
+        !this.state.alertActive &&
+        Date.now() - this.lastColorCommandAt > SCENE_BATCH_GRACE_MS
+      ) {
+        // A redundant ON written to the Lightbulb itself while an effect or
+        // color is active: this is how the original mqttthing config let a
+        // scene pull the lamp back to normal light/Adaptive Lighting - a
+        // scene that includes this lamp always writes On=true, and it's the
+        // only write from an "Adaptive Lighting" scene that's guaranteed to
+        // arrive (iOS skips rewriting the AL transition often enough that
+        // relying on it alone proved flaky). Effect automations are
+        // unaffected: they drive the Effects TV accessory, whose redundant
+        // Active goes through the 'tv' no-op below, and a color/effect
+        // command published within the last couple of seconds exempts this
+        // ON as part of that same scene batch (see SCENE_BATCH_GRACE_MS).
+        // An active alert also wins - its restore handles cleanup.
+        this.log.debug(
+          `[${this.config.name}] setOn: redundant Lightbulb ON while in ${this.state.mode} mode - returning to normal light`,
+        );
+        this.markLocalChange();
+        this.resetToNormalLight();
+        this.publishColorTemp(this.state.mireds, this.state.brightness);
+        this.emit('change', this.getState());
+        return;
+      }
+      // Redundant "on" with nothing to exit (already in plain adaptive
+      // mode), from the Effects TV (HomeKit doesn't guarantee whether
+      // Active or ActiveIdentifier arrives first, so a TV "on" must never
+      // reset a just-selected effect), or while an alert is active.
       this.log.debug(`[${this.config.name}] setOn: no-op (already on)`);
       return;
     }

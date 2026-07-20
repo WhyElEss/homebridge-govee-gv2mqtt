@@ -28,7 +28,7 @@ export class LightAccessory {
     this.service
       .getCharacteristic(Characteristic.On)
       .onGet(() => this.device.getState().isOn)
-      .onSet((value) => this.device.setOn(value as boolean));
+      .onSet((value) => this.device.setOn(value as boolean, 'lightbulb'));
 
     this.service
       .getCharacteristic(Characteristic.Brightness)
