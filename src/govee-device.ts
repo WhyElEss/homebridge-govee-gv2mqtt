@@ -162,6 +162,7 @@ export class GoveeDevice extends EventEmitter {
   private lastAlConfiguredAt = 0;
   private lastColorCommandAt = 0;
   private lastPublishAt = 0;
+  private lastCommandedOn = false;
   private lastSentMireds = -1;
   private offEnforceUntil = 0;
   private offEnforceAttempts = 0;
@@ -263,6 +264,12 @@ export class GoveeDevice extends EventEmitter {
       // deferred AL nudges can skip re-sending an imperceptible change.
       this.lastSentMireds = payload.color_temp;
     }
+    // Recorded here, as the command goes out, rather than when the device
+    // confirms it: gv2mqtt's report of a state change can reach us in the
+    // same socket read as the confirmation of the command that caused it,
+    // so anything stamped on confirmation is stamped too late to recognise
+    // the report as an echo. See isEchoOfOurOwnOn.
+    this.lastCommandedOn = payload.state === 'ON';
     this.lastPublishAt = Date.now();
     this.log.debug(`[${this.config.name}] Publishing MQTT: ${this.config.commandTopic} = ${JSON.stringify(payload)}`);
     this.client.publish(this.config.commandTopic, JSON.stringify(payload));
@@ -338,6 +345,13 @@ export class GoveeDevice extends EventEmitter {
     const reportedOn = msg.state === 'ON';
     if (this.defendPhysicalOff(reportedOn)) {
       return; // suppressed a bogus "on"; nothing else in the report is trustworthy
+    }
+    if (!reportedOn && this.isEchoOfOurOwnOn()) {
+      this.log.debug(
+        `[${this.config.name}] Ignoring an OFF report that contradicts the ON we just commanded ` +
+          '(Govee\'s spurious post-command blip); the light stays on',
+      );
+      return; // our own "on" coming back at us; nothing in the report is trustworthy
     }
     this.applyReportedState(msg, reportedOn);
     this.emit('change', this.getState());
@@ -438,6 +452,38 @@ export class GoveeDevice extends EventEmitter {
    */
   private isOutOfBandOff(): boolean {
     return Date.now() - this.lastPublishAt >= OFF_UNSOLICITED_GRACE_MS;
+  }
+
+  /**
+   * True when an incoming "off" report is our own ON command coming back at
+   * us rather than the lamp actually being off - Govee's known spurious OFF
+   * blip a couple of seconds after an effect/color command (the same blip
+   * OFF_UNSOLICITED_GRACE_MS already stops the watchdog mistaking for a
+   * button press). Three things have to hold: HomeKit currently shows the
+   * light on, so there is something to protect; the last command we
+   * published asked for ON (recorded in publish(), as it goes out) and is
+   * recent enough to account for this report; and defendPhysicalOff - which
+   * runs first - did not just read this same report as the user's own
+   * doing, since an off it decided to defend has to reach `isOn` or its
+   * "unsolicited ON" branch, which requires a cached off, can never fire.
+   *
+   * Suppressing the blip is what keeps the Home tile (and the Effects
+   * accessory's Active) from going dark for the few seconds until the real
+   * "on" report lands. Reflecting it was worse than a flicker: with `isOn`
+   * cached false, a tap on the seemingly-off tile reached setOn with
+   * wasOn=false, which takes the full power-on path and resets the effect
+   * the user had just selected, and the 5s effect re-assertion dropped
+   * itself for a light it believed was off.
+   *
+   * This costs nothing in physical-off defence: inside the same grace
+   * window defendPhysicalOff already refuses to read an "off" as a button
+   * press, so before this guard the off reached `isOn` but armed no
+   * watchdog - a bogus "on" behind it was accepted either way.
+   */
+  private isEchoOfOurOwnOn(): boolean {
+    return (
+      this.state.isOn && this.lastCommandedOn && !this.isOutOfBandOff() && Date.now() >= this.offEnforceUntil
+    );
   }
 
   private applyReportedState(msg: IncomingMessage, reportedOn: boolean): void {

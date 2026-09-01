@@ -204,14 +204,34 @@ inside the plugin the moment the switch is toggled.
 ## Behavior notes
 
 - **Optimistic cache window** (`optimisticCacheMs`, default 10000ms): a
-  locally-set value (brightness, color, on/off) is trusted for this long
-  before an incoming device report is allowed to overwrite it, so the Home
-  app doesn't flicker back to a stale value while the round trip to the
-  physical device completes. A device-reported "off" specifically only
-  resets the cached effect/mode once this window has passed, so a spurious
-  transient "off" report right after turning a light on with an effect
-  selected doesn't wipe that selection (see the effect race note below for
-  why that can happen).
+  locally-set brightness, color or color temperature is trusted for this
+  long before an incoming device report is allowed to overwrite it, so the
+  Home app doesn't flicker back to a stale value while the round trip to
+  the physical device completes — gv2mqtt's reports have been observed
+  still carrying the pre-command value six seconds after the command went
+  out. A device-reported "off" also only resets the cached effect/mode once
+  this window has passed, so a spurious transient "off" right after turning
+  a light on with an effect selected doesn't wipe that selection (see the
+  effect race note below for why that can happen).
+- **Whose change is it** (on/off): power state can't simply be held for the
+  window above — a press of the lamp's own button has to get through
+  promptly. It's decided by intent instead: the plugin records *what it
+  asked for* as each command goes out (not when the device confirms it —
+  gv2mqtt's report of a change can arrive in the same socket read as the
+  confirmation of the command that caused it, which is too late), and an
+  "off" report that contradicts an ON command published within the last 10s
+  is treated as that command echoing back, not as the lamp going off. It
+  changes neither the cache nor HomeKit. Everything else still gets
+  through: an "off" nobody asked for, one arriving while Adaptive Lighting
+  was the last thing driving the lamp, and one the plugin itself commanded
+  are all applied as before, and an off that the power-off watchdog decides
+  to defend is always applied (the watchdog needs the cached "off" to
+  recognise a later bogus relight). This is what stops Govee's spurious OFF
+  blip a couple of seconds after an effect/color command from blanking the
+  Home tile and the Effects accessory for the few seconds until the real
+  "on" report lands — and, worse than the flicker, from leaving `isOn`
+  cached false, where a tap on the seemingly-off tile took the full
+  power-on path and cancelled the effect just selected.
 - **White vs. color heuristic** (`colorSaturationThreshold`, default
   `0.75`): when Home's color wheel is used, the resulting color's
   saturation decides whether it's sent to the device as a
@@ -338,3 +358,15 @@ inside the plugin the moment the switch is toggled.
   setter call (with the state it saw and what it decided to do) is logged
   at debug level. Enable Homebridge's debug mode to see it when
   troubleshooting unexpected behavior.
+
+## Tests
+
+`npm test` builds the plugin and runs the suite with Node's built-in test
+runner — no test dependencies to install.
+
+The mock bridge in `test/` deliberately **answers**: every command it
+receives is followed by a state report, the way gv2mqtt does, including
+Govee's spurious OFF blip after an effect/color command. A silent mock —
+one that accepts commands and never reports anything back — hides the
+entire "whose change is it" class of bug described above, because that bug
+lives only in what the plugin does with a device's unsolicited reports.
