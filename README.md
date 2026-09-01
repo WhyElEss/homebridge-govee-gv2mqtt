@@ -263,20 +263,21 @@ inside the plugin the moment the switch is toggled.
     in Govee's pipeline for a button press to race.
   - If an "off" report still arrives shortly after a nudge was published,
     the plugin **re-asserts the off** so the button press wins.
-  - For ~30s after an out-of-band "off" that arrived during active AL
-    nudging, an unsolicited "on" report that no HomeKit action asked for
-    is **answered with an OFF command** (up to 3 times) instead of being
-    accepted — this is what beats Govee's late server-side settling, which
-    needs no further input from the plugin to relight the lamp. Any real
-    power-on through HomeKit disarms this watchdog instantly; a genuine
-    out-of-band power-on (Govee app, pressing the button back on within
-    that half-minute) can be fought at most 3 times and then wins. The
-    watchdog only ever arms while the lamp is idle in plain
-    color-temperature mode with an AL nudge as the *last command sent* —
-    any deliberate HomeKit command (an effect selection, a color change,
-    an on/off) resets that bookkeeping, so Govee's known spurious-OFF blip
-    after an effect command can't be mistaken for a button press while
-    paging through effects.
+  - For ~30s after an out-of-band "off", an unsolicited "on" report that
+    no HomeKit action asked for is **answered with an OFF command** (up to
+    3 times) instead of being accepted — this is what beats Govee's late
+    server-side settling, which needs no further input from the plugin to
+    relight the lamp. Any real power-on through HomeKit disarms this
+    watchdog instantly; a genuine out-of-band power-on (Govee app, pressing
+    the button back on within that half-minute) can be fought at most 3
+    times and then wins. An "off" counts as out-of-band when either an AL
+    nudge was the *last command sent* (the lamp was idle in plain
+    color-temperature mode), or nothing the plugin published in the last
+    10s can account for it at all — the latter is what extends the defence
+    to a button press while an **effect or a color** is running, which
+    before v0.7.2 armed nothing. That 10s grace is also what keeps Govee's
+    known spurious-OFF blip a couple of seconds after an effect command
+    from being mistaken for a button press while paging through effects.
   Nudges are also sent without a redundant `brightness` field, halving the
   Govee API calls gv2mqtt makes per nudge.
 - **Real effect list per device** (needs `refreshStateOnConnect`, default
@@ -327,6 +328,12 @@ inside the plugin the moment the switch is toggled.
   single re-send of that same command ~5s later, cancelled/replaced if a
   different effect gets selected before then — so paging quickly through
   effects by hand in Home doesn't pile up a burst of redundant commands.
+  The re-send is **dropped if the light is off** by the time it fires: an
+  effect command carries `state: "ON"`, so re-sending it after the lamp was
+  switched off during those 5s would light it back up. Before v0.7.2 that
+  is exactly what happened — the guard checked only the tracked mode, which
+  the optimistic cache window (longer than the 5s delay) held at `effect`
+  even after the "off" report had landed.
 - **Debug logging**: every MQTT publish/receive and every characteristic
   setter call (with the state it saw and what it decided to do) is logged
   at debug level. Enable Homebridge's debug mode to see it when

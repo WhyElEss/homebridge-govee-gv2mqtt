@@ -79,9 +79,11 @@ const AL_OFF_REASSERT_WINDOW_MS = 20000;
 const AL_NUDGE_RECENT_MS = 60000;
 
 /**
- * After a device-reported "off" that arrived while AL was actively nudging
- * (see AL_NUDGE_RECENT_MS), treat the off as the user's explicit intent -
- * they pressed the lamp's physical button - and defend it: any "on" report
+ * After a device-reported "off" that nothing we sent can account for -
+ * either one that arrived while AL was actively nudging (see
+ * AL_NUDGE_RECENT_MS) or, in any mode, one with no command of ours behind it
+ * (see isOutOfBandOff) - treat the off as the user's explicit intent, they
+ * pressed the lamp's physical button, and defend it: any "on" report
  * arriving within this window without a matching HomeKit-originated power-on
  * gets answered with an OFF command. Bounded by OFF_ENFORCE_MAX_REASSERTS
  * so a genuine out-of-band power-on (Govee app, second button press) can
@@ -89,6 +91,17 @@ const AL_NUDGE_RECENT_MS = 60000;
  */
 const OFF_ENFORCE_WINDOW_MS = 30000;
 const OFF_ENFORCE_MAX_REASSERTS = 3;
+
+/**
+ * How long after a command of ours an incoming "off" report is still
+ * attributable to that command rather than to the lamp's physical button.
+ * Covers both of the ways we can be the cause: our own OFF echoing back as a
+ * report, and the spurious OFF blip Govee's cloud can emit a couple of
+ * seconds after an effect/color command (the blip that used to make the
+ * watchdog fight manual effect browsing). Past this window nothing we did
+ * explains the off, so it was someone at the lamp - see isOutOfBandOff.
+ */
+const OFF_UNSOLICITED_GRACE_MS = 10000;
 
 /**
  * Minimum change in mireds since the last color_temp we actually sent for
@@ -148,6 +161,7 @@ export class GoveeDevice extends EventEmitter {
   private lastAlCommandAt = 0;
   private lastAlConfiguredAt = 0;
   private lastColorCommandAt = 0;
+  private lastPublishAt = 0;
   private lastSentMireds = -1;
   private offEnforceUntil = 0;
   private offEnforceAttempts = 0;
@@ -249,6 +263,7 @@ export class GoveeDevice extends EventEmitter {
       // deferred AL nudges can skip re-sending an imperceptible change.
       this.lastSentMireds = payload.color_temp;
     }
+    this.lastPublishAt = Date.now();
     this.log.debug(`[${this.config.name}] Publishing MQTT: ${this.config.commandTopic} = ${JSON.stringify(payload)}`);
     this.client.publish(this.config.commandTopic, JSON.stringify(payload));
   }
@@ -335,24 +350,35 @@ export class GoveeDevice extends EventEmitter {
    */
   private defendPhysicalOff(reportedOn: boolean): boolean {
     if (!reportedOn) {
+      // Two independent reasons to read a device-reported "off" as the
+      // user's own doing, and so worth defending. Both hazards below were
+      // observed with Govee's cloud.
+      //
+      // (a) The last command we sent was a background AL nudge (every
+      //     deliberate HomeKit command resets lastAlCommandAt via
+      //     markLocalChange), so the lamp was sitting idle in plain adaptive
+      //     mode when it went off. A nudge published moments ago may still
+      //     be in flight and wake it back up - gv2mqtt maps color-temp
+      //     commands onto Govee API calls that power the lamp on - so this
+      //     case additionally re-asserts the off.
+      // (b) Nothing we published can account for the off at all (see
+      //     isOutOfBandOff), whatever mode the lamp was in. This is the
+      //     plain "someone pressed the button" case, and until 0.7.2 it was
+      //     defended only in adaptive mode: an off while an effect or a
+      //     color was running armed nothing, because lastAlCommandAt is
+      //     zeroed by the very command that set that effect/color.
       const sinceNudge = Date.now() - this.lastAlCommandAt;
-      if (this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS && this.state.mode === 'adaptive') {
-        // The device reports "off" while the lamp is sitting idle in plain
-        // adaptive mode and the last command we sent was a background AL
-        // nudge (every deliberate HomeKit command resets lastAlCommandAt via
-        // markLocalChange) - i.e. the light was just powered off
-        // out-of-band, by its physical button. Two hazards follow, both
-        // observed with Govee's cloud:
-        //
-        // 1. A nudge we published moments ago may still be in flight and
-        //    wake the lamp back up (gv2mqtt maps color-temp commands onto
-        //    Govee API calls that power it on). Re-assert the off.
-        // 2. Govee's cloud can also settle an older, already-delivered
-        //    command AFTER the physical off, relighting the lamp on its
-        //    own with no further input from us. That arrives here as an
-        //    unsolicited "on" report - arm a short watchdog window in which
-        //    such an "on" (one no HomeKit action asked for) is answered
-        //    with an OFF command; see the reportedOn branch below.
+      const duringAdaptiveLighting =
+        this.lastAlCommandAt > 0 && sinceNudge < AL_NUDGE_RECENT_MS && this.state.mode === 'adaptive';
+      const unsolicited = this.state.isOn && this.isOutOfBandOff();
+
+      if (duringAdaptiveLighting || unsolicited) {
+        // Govee's cloud can settle an older, already-delivered command AFTER
+        // the physical off, relighting the lamp on its own with no further
+        // input from us. That arrives here as an unsolicited "on" report -
+        // arm a short watchdog window in which such an "on" (one no HomeKit
+        // action asked for) is answered with an OFF command; see the
+        // reportedOn branch below.
         if (Date.now() >= this.offEnforceUntil) {
           // Only arm a fresh window if one isn't already running - our own
           // corrective OFFs echo back as more "off" reports, and letting
@@ -361,11 +387,11 @@ export class GoveeDevice extends EventEmitter {
           this.offEnforceUntil = Date.now() + OFF_ENFORCE_WINDOW_MS;
           this.offEnforceAttempts = 0;
           this.log.debug(
-            `[${this.config.name}] Out-of-band OFF during active Adaptive Lighting; ` +
+            `[${this.config.name}] Out-of-band OFF (${duringAdaptiveLighting ? 'during active Adaptive Lighting' : `mode=${this.state.mode}`}); ` +
               `defending it for ${OFF_ENFORCE_WINDOW_MS / 1000}s`,
           );
         }
-        if (sinceNudge < AL_OFF_REASSERT_WINDOW_MS) {
+        if (duringAdaptiveLighting && sinceNudge < AL_OFF_REASSERT_WINDOW_MS) {
           this.lastAlCommandAt = 0;
           this.log.debug(
             `[${this.config.name}] Device reported OFF right after an Adaptive Lighting nudge; ` +
@@ -396,6 +422,20 @@ export class GoveeDevice extends EventEmitter {
       return true;
     }
     return false;
+  }
+
+  /**
+   * True when no command of ours can explain an incoming "off" report, i.e.
+   * the lamp was switched off at the lamp. Anything we published within
+   * OFF_UNSOLICITED_GRACE_MS accounts for the report by itself and must not
+   * arm the watchdog: our own OFF echoes back as an "off" report, and an
+   * effect/color command is followed a couple of seconds later by Govee's
+   * spurious OFF blip - reading that blip as a button press is what used to
+   * make the watchdog kill each newly selected effect while browsing them by
+   * hand.
+   */
+  private isOutOfBandOff(): boolean {
+    return Date.now() - this.lastPublishAt >= OFF_UNSOLICITED_GRACE_MS;
   }
 
   private applyReportedState(msg: IncomingMessage, reportedOn: boolean): void {
@@ -746,6 +786,17 @@ export class GoveeDevice extends EventEmitter {
       const reassertIndex = index;
       this.effectReassertTimer = setTimeout(() => {
         this.effectReassertTimer = undefined;
+        if (!this.state.isOn) {
+          // The lamp was switched off (physical button, HomeKit, an alert
+          // restore) during the re-assertion delay. publishEffect sends
+          // {state:"ON", effect}, so firing now would light it back up -
+          // and `mode` can't catch that on its own: setEffectIndex has just
+          // opened the optimistic window, which is longer than this delay
+          // and makes applyReportedState skip resetToNormalLight, leaving
+          // mode stuck at 'effect' even after the "off" report lands.
+          this.log.debug(`[${this.config.name}] Dropping effect re-assertion - the light is off`);
+          return;
+        }
         if (this.state.mode === 'effect' && this.state.effectIndex === reassertIndex) {
           this.log.debug(`[${this.config.name}] Re-asserting effect "${name}" to guard against a server-side race`);
           this.publishEffect(name);
