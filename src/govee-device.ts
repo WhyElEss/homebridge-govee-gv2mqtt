@@ -344,9 +344,11 @@ export class GoveeDevice extends EventEmitter {
   }
 
   /**
-   * Guards a physical (out-of-band) power-off against being undone by
-   * Adaptive Lighting traffic. Returns true when an unsolicited "on" report
-   * was suppressed and must not be applied to state at all.
+   * Guards a physical (out-of-band) power-off against being undone - either
+   * by Adaptive Lighting traffic still in flight, or by Govee's cloud
+   * settling a stale command of its own accord, whatever mode the lamp was
+   * in. Returns true when an unsolicited "on" report was suppressed and must
+   * not be applied to state at all.
    */
   private defendPhysicalOff(reportedOn: boolean): boolean {
     if (!reportedOn) {
