@@ -1,19 +1,19 @@
 <style>
   .gv-intro { margin-bottom: 1rem; }
-  .gv-device { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: 1rem; }
-  .gv-device-head {
-    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
-    padding: .6rem .85rem; border-bottom: 1px solid rgba(128,128,128,.25);
+  .gv-device { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: .75rem; }
+  .gv-device > summary {
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; cursor: pointer;
+    padding: .6rem .85rem; list-style: revert;
   }
-  .gv-device-head h5 { margin: 0; font-size: 1rem; }
+  .gv-device[open] > summary { border-bottom: 1px solid rgba(128,128,128,.25); }
+  .gv-name { font-weight: 600; }
   .gv-count { font-variant-numeric: tabular-nums; margin-left: auto; font-size: .85rem; opacity: .8; }
-  .gv-count.gv-full { color: #d9534f; opacity: 1; font-weight: 600; }
-  .gv-actions { display: flex; gap: .4rem; }
-  .gv-actions button { font-size: .78rem; padding: .1rem .5rem; }
-  .gv-list {
-    max-height: 17rem; overflow-y: auto; padding: .5rem .85rem;
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .1rem .75rem;
-  }
+  .gv-count.gv-warn { color: #d9534f; opacity: 1; font-weight: 600; }
+  .gv-body { padding: .6rem .85rem .8rem; }
+  .gv-actions { display: flex; gap: .4rem; margin-bottom: .5rem; }
+  .gv-actions button { font-size: .78rem; padding: .12rem .55rem; }
+  .gv-dropped { font-size: .82rem; color: #d9534f; margin: 0 0 .5rem; }
+  .gv-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .1rem .75rem; }
   .gv-item { display: flex; align-items: center; gap: .45rem; padding: .12rem 0; font-size: .87rem; }
   .gv-item input { margin: 0; flex: none; }
   .gv-item.gv-disabled { opacity: .45; }
@@ -24,7 +24,7 @@
 <div class="gv-intro">
   <p class="mb-1">
     Choose which of each lamp’s effects appear as inputs on its <strong>Effects</strong> accessory
-    in the Home app. Everything else about the plugin is on the regular settings form.
+    in the Home app. The ticks show what is in HomeKit <em>right now</em>.
   </p>
   <p class="gv-note mb-0" id="gv-cap-note"></p>
 </div>
@@ -39,8 +39,8 @@
 
 <script>
   (async () => {
-    // Mirrors MAX_SELECTABLE_EFFECTS in src/effects-accessory.ts: HomeKit
-    // caps an accessory at 100 services, two go to the accessory info and
+    // Mirrors MAX_SELECTABLE_EFFECTS in src/effects-accessory.ts: HomeKit caps
+    // an accessory at 100 services, two go to the accessory information and
     // the television itself, and one input is always "Normal Light".
     const MAX_SELECTABLE = 97;
 
@@ -52,8 +52,7 @@
     const devicesEl = document.getElementById('gv-devices');
     const emptyEl = document.getElementById('gv-empty');
     document.getElementById('gv-cap-note').textContent =
-      'HomeKit allows at most ' + MAX_SELECTABLE + ' effects per lamp. Selecting none means \u201cshow them all\u201d, ' +
-      'which is the default and is truncated at that limit. Changes take effect when you press Save.';
+      'HomeKit fits at most ' + MAX_SELECTABLE + ' effects per lamp. Changes take effect when you press Save.';
 
     homebridge.showSpinner();
     let catalogs;
@@ -71,15 +70,12 @@
     const byId = new Map((catalogs.devices || []).map((d) => [d.deviceId, d.effects]));
     const configured = ((config[0] || {}).devices) || [];
 
-    // Only lamps that are both configured and have a cached catalog can be
-    // offered: without the catalog there is nothing to list, and without the
-    // config entry there is nowhere to save the choice.
     const rows = configured
       .map((device) => ({
         deviceId: device.deviceId,
         name: device.name || device.deviceId,
         effects: byId.get(device.deviceId),
-        selected: new Set(Array.isArray(device.visibleEffects) ? device.visibleEffects : []),
+        configured: Array.isArray(device.visibleEffects) ? device.visibleEffects : null,
       }))
       .filter((row) => Array.isArray(row.effects) && row.effects.length > 0);
 
@@ -102,7 +98,7 @@
       if (!entry) {
         return;
       }
-      if (names.length === 0) {
+      if (names === null) {
         delete entry.visibleEffects;
       } else {
         entry.visibleEffects = names;
@@ -111,52 +107,75 @@
     }
 
     for (const row of rows) {
-      const { effects, selected } = row;
+      const { effects } = row;
+      const overflows = effects.length > MAX_SELECTABLE;
 
-      const card = document.createElement('div');
+      // What is actually in HomeKit. With no explicit selection the plugin
+      // takes the list in order and truncates, so on a lamp with more effects
+      // than will fit the default is NOT "all of them" - the tail is silently
+      // dropped. Ticking the real set is the whole point: otherwise the page
+      // claims a state the accessory cannot be in.
+      let explicit = row.configured && row.configured.length > 0;
+      const selected = new Set(
+        explicit
+          ? row.configured.filter((n) => effects.includes(n))
+          : effects.slice(0, MAX_SELECTABLE),
+      );
+
+      const card = document.createElement('details');
       card.className = 'gv-device';
+      card.open = rows.length === 1;
       card.innerHTML =
-        '<div class="gv-device-head">' +
-          '<h5></h5>' +
+        '<summary><span class="gv-name"></span><span class="gv-count"></span></summary>' +
+        '<div class="gv-body">' +
           '<div class="gv-actions">' +
             '<button type="button" class="btn btn-elegant btn-sm" data-act="all">Select all</button>' +
-            '<button type="button" class="btn btn-elegant btn-sm" data-act="none">Show all</button>' +
+            '<button type="button" class="btn btn-elegant btn-sm" data-act="default">Reset to default</button>' +
           '</div>' +
-          '<span class="gv-count"></span>' +
-        '</div>' +
-        '<div class="gv-list"></div>';
-      card.querySelector('h5').textContent = row.name;
+          '<p class="gv-dropped" style="display:none"></p>' +
+          '<div class="gv-list"></div>' +
+        '</div>';
+      card.querySelector('.gv-name').textContent = row.name;
 
       const listEl = card.querySelector('.gv-list');
       const countEl = card.querySelector('.gv-count');
+      const droppedEl = card.querySelector('.gv-dropped');
       const boxes = new Map();
 
       const refresh = () => {
         const n = selected.size;
         const atCap = n >= MAX_SELECTABLE;
-        countEl.textContent = n === 0
-          ? 'showing all ' + effects.length
-          : n + ' of ' + MAX_SELECTABLE + ' selected';
-        countEl.classList.toggle('gv-full', atCap);
+        countEl.textContent = explicit
+          ? n + ' of ' + effects.length + ' chosen'
+          : n + ' of ' + effects.length + ' \u2014 default';
+        countEl.classList.toggle('gv-warn', atCap || (!explicit && overflows));
+
+        // Only worth saying while on the default, where the drop is silent
+        // and not the user's doing.
+        const dropped = !explicit && overflows ? effects.length - MAX_SELECTABLE : 0;
+        droppedEl.style.display = dropped ? '' : 'none';
+        droppedEl.textContent = dropped
+          ? dropped + ' effect(s) at the end of the list do not fit and are not in HomeKit. '
+            + 'Tick the ones you want instead.'
+          : '';
+
         for (const [name, box] of boxes) {
-          // The cap is enforced by making the unchecked ones unclickable once
-          // it is reached, so an over-long list can never be saved from here.
-          // The plugin truncates as well, so a hand-edited config.json is
-          // just as safe.
           const blocked = atCap && !selected.has(name);
           box.disabled = blocked;
           box.parentElement.classList.toggle('gv-disabled', blocked);
         }
       };
 
-      const commit = async () => {
+      const commit = async (names) => {
         refresh();
         try {
-          await stage(row.deviceId, effects.filter((e) => selected.has(e)));
+          await stage(row.deviceId, names);
         } catch (err) {
           homebridge.toast.error(err.message || String(err), 'Could not update the configuration');
         }
       };
+
+      const chosen = () => effects.filter((e) => selected.has(e));
 
       for (const name of effects) {
         const label = document.createElement('label');
@@ -175,32 +194,41 @@
           } else {
             selected.delete(name);
           }
-          commit();
+          // Any tick is a deliberate choice, so it stops being the default.
+          explicit = true;
+          commit(chosen());
         });
       }
 
       card.querySelector('[data-act="all"]').addEventListener('click', () => {
+        // Every effect that fits, in list order. Stored explicitly even when
+        // the whole catalog fits: the button says "select all", so it has to
+        // tick all of them, and an earlier attempt to be clever about this -
+        // treating it as the default whenever the list was under the cap -
+        // simply made the button do nothing on a lamp with 47 effects.
         selected.clear();
-        // A lamp with fewer effects than the cap is already showing all of
-        // them by default, so "select all" is stored as the default rather
-        // than as a list that would go stale the moment Govee adds one.
-        if (effects.length > MAX_SELECTABLE) {
-          for (const name of effects.slice(0, MAX_SELECTABLE)) {
-            selected.add(name);
-          }
+        for (const name of effects.slice(0, MAX_SELECTABLE)) {
+          selected.add(name);
         }
+        explicit = true;
         for (const [name, box] of boxes) {
           box.checked = selected.has(name);
         }
-        commit();
+        commit(chosen());
       });
 
-      card.querySelector('[data-act="none"]').addEventListener('click', () => {
+      card.querySelector('[data-act="default"]').addEventListener('click', () => {
+        // Back to no setting at all: the plugin takes the list in order, and
+        // effects Govee adds later appear on their own.
         selected.clear();
-        for (const box of boxes.values()) {
-          box.checked = false;
+        for (const name of effects.slice(0, MAX_SELECTABLE)) {
+          selected.add(name);
         }
-        commit();
+        explicit = false;
+        for (const [name, box] of boxes) {
+          box.checked = selected.has(name);
+        }
+        commit(null);
       });
 
       refresh();
