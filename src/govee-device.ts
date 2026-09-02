@@ -609,6 +609,22 @@ export class GoveeDevice extends EventEmitter {
     }
     this.markLocalChange();
     this.state.isOn = on;
+
+    if (on && this.hasFreshColorIntent()) {
+      // Powering on as the tail of one gesture that also picked a color.
+      // Home writes Hue and Saturation before On when a color is chosen on
+      // a light that's off, and flushHueSat can only record that choice -
+      // publishing it there would wake a lamp the user left off. Turning on
+      // with the usual resetToNormalLight()/publishColorTemp() here would
+      // then overwrite the color with white before it was ever sent, which
+      // is exactly what the user saw: red at 100% on an off lamp came up as
+      // plain Adaptive Lighting, with no color command on the wire at all.
+      const { r, g, b } = hueSatToRgb(this.state.hue, this.state.saturation, this.state.brightness);
+      this.publishRgb({ r, g, b }, this.state.brightness);
+      this.emit('change', this.getState());
+      return;
+    }
+
     this.resetToNormalLight();
     if (on) {
       this.publishColorTemp(this.state.mireds, this.state.brightness);
@@ -616,6 +632,18 @@ export class GoveeDevice extends EventEmitter {
       this.publishPowerOff();
     }
     this.emit('change', this.getState());
+  }
+
+  /**
+   * True when a color was chosen within the same batch of characteristic
+   * writes that is now turning the light on - the same SCENE_BATCH_GRACE_MS
+   * window that keeps a scene's own On write from wiping the color it just
+   * set. Deliberately narrow: a lamp that has simply been sitting off comes
+   * back to normal light exactly as before, because lastColorCommandAt will
+   * be long stale by then.
+   */
+  private hasFreshColorIntent(): boolean {
+    return this.state.mode === 'rgb' && Date.now() - this.lastColorCommandAt <= SCENE_BATCH_GRACE_MS;
   }
 
   setBrightness(brightness: number): void {
@@ -790,9 +818,16 @@ export class GoveeDevice extends EventEmitter {
         this.publishColorTemp(mireds, bri);
       }
     } else {
+      // The mode and the timestamp are recorded whether or not the light is
+      // on: picking a color on a light that's off is still a color choice,
+      // and Home sends Hue/Saturation *before* the On write, so setOn has to
+      // be able to see that a color was just asked for. Only the command
+      // itself is withheld - touching the color wheel must not wake a lamp
+      // the user left off.
+      this.state.mode = 'rgb';
+      this.state.effectIndex = 1;
+      this.lastColorCommandAt = Date.now();
       if (this.state.isOn) {
-        this.state.mode = 'rgb';
-        this.state.effectIndex = 1;
         this.publishRgb({ r, g, b }, bri);
       }
     }

@@ -232,3 +232,62 @@ test('an off we asked for ourselves is reflected as normal', async (t) => {
   assert.strictEqual(device.getState().isOn, false, 'and the echo must not undo it');
   assert.deepStrictEqual(homekit.of('On'), [true, false]);
 });
+
+/**
+ * Home writes Hue and Saturation *before* On when a color is picked on a
+ * light that is off. Reproduces the capture from 2026-09-02 09:48:38-41,
+ * where red at 100% on an off lamp reached the lamp as plain white: no
+ * color command was ever put on the wire.
+ */
+test('a color picked while the light is off survives being turned on', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  assert.strictEqual(device.getState().isOn, false, 'the lamp starts off');
+
+  // Home's color picker: hue and saturation first...
+  device.setHue(0);
+  device.setSaturation(100);
+  await settle(80); // the 50ms hue/sat coalescing flush
+
+  assert.strictEqual(bridge.published.length, 0, 'touching the color wheel must not wake an off lamp');
+
+  // ...then brightness and the power write, ~2s later in the real capture.
+  device.setBrightness(3);
+  device.setOn(true, 'lightbulb');
+
+  const colorCommands = bridge.published.filter((c) => c.color);
+  assert.strictEqual(colorCommands.length, 1, 'turning on must send the color that was just chosen');
+  assert.ok(colorCommands[0].color.r > 0, `expected red, got ${JSON.stringify(colorCommands[0].color)}`);
+  assert.strictEqual(colorCommands[0].color.g, 0);
+  assert.strictEqual(colorCommands[0].color.b, 0);
+  assert.ok(
+    !bridge.published.some((c) => typeof c.color_temp === 'number'),
+    'no color-temperature command may overwrite the color on the way on',
+  );
+  assert.strictEqual(device.getState().mode, 'rgb');
+});
+
+test('a light that has simply been sitting off still comes back to normal light', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setHue(0);
+  device.setSaturation(100);
+  await settle(80);
+
+  // Well past SCENE_BATCH_GRACE_MS: this power-on has nothing to do with
+  // that color choice, so the pre-existing "on returns to normal light"
+  // behaviour must be untouched.
+  await settle(2100);
+  device.setOn(true, 'lightbulb');
+
+  assert.ok(
+    !bridge.published.some((c) => c.color),
+    'a stale color intent must not colour a plain power-on',
+  );
+  assert.deepStrictEqual(bridge.published, [{ state: 'ON', color_temp: 250, brightness: 100 }]);
+  assert.strictEqual(device.getState().mode, 'adaptive');
+});

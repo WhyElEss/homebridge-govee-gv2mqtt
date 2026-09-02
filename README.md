@@ -237,6 +237,17 @@ inside the plugin the moment the switch is toggled.
   saturation decides whether it's sent to the device as a
   color-temperature command (low saturation → treated as "white") or a
   true RGB color command.
+- **Picking a color on a light that's off**: Home writes Hue and
+  Saturation *before* the On write. The color command itself is withheld
+  while the light is off — touching the color wheel must not wake a lamp
+  you left off — but the choice is recorded, and the power-on that follows
+  within ~2s (the same scene-batch window above) sends that color instead
+  of the usual "back to normal light" color temperature. Before v0.7.5 the
+  choice was dropped entirely and the power-on overwrote it with white:
+  red at 100% on an off lamp came up as plain Adaptive Lighting, with no
+  color command on the wire at all. A light that has simply been sitting
+  off is unaffected — it still comes back to normal light, because by then
+  there is no fresh color choice to honour.
 - **Adaptive Lighting** requires the Home Hub to be on iOS 13+/aligned
   hardware; it's controlled per-device via `adaptiveLighting` in config.
   While an effect is active, only AL's **background** color-temperature
