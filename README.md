@@ -417,6 +417,27 @@ inside the plugin the moment the switch is toggled.
   is exactly what happened — the guard checked only the tracked mode, which
   the optimistic cache window (longer than the 5s delay) held at `effect`
   even after the "off" report had landed.
+- **Cached effect catalog**: gv2mqtt doesn't retain its discovery topic, so
+  a device's real effect list only arrives ~17s into a run. Building the
+  Effects accessory from the fallback list and rebuilding it when the real
+  one lands is a change to the bridge's *configuration*, and HomeKit answers
+  a changed configuration by re-reading every service the bridge has — with
+  ~200 services across two lamps that is what makes the Home app sluggish
+  for a while after every restart. Measured on 2026-09-02: the child bridge
+  incremented its HomeKit configuration number exactly **three times per
+  restart** (once at publish, once per lamp as its real list landed),
+  reaching 351 while no other bridge in the same Homebridge was past 27.
+
+  The effect list and its name→identifier map are therefore cached in
+  `accessory.context`, which Homebridge persists, and restored before any
+  service is built — so the accessory is published in its final shape and
+  the discovery message that follows is a no-op. Both halves are needed:
+  identifiers are handed out in first-seen order, so restoring the list
+  without the map would renumber the effects and desynchronise Home's own
+  input cache (see the stable-identifier note). On the first run after
+  upgrading there is nothing cached, so the catalog saved is whatever that
+  run ended up with — the numbering Home already knows — which is what keeps
+  identifiers from shifting even once.
 - **Debug logging**: every MQTT publish/receive and every characteristic
   setter call (with the state it saw and what it decided to do) is logged
   at debug level. Enable Homebridge's debug mode to see it when

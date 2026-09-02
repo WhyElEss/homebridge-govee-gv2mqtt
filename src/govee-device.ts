@@ -250,6 +250,8 @@ export class GoveeDevice extends EventEmitter {
    */
   private readonly identifierByName = new Map<string, number>();
   private readonly nameByIdentifier = new Map<number, string>();
+  private nextIdentifier = 1;
+  private effectsAreReal = false;
 
   constructor(
     private readonly client: MqttClient,
@@ -295,11 +297,70 @@ export class GoveeDevice extends EventEmitter {
   identifierForName(name: string): number {
     let id = this.identifierByName.get(name);
     if (id === undefined) {
-      id = this.identifierByName.size + 1;
+      // One past the highest handed out so far, rather than `size + 1`: a
+      // catalog restored from the accessory cache can have gaps (a name that
+      // has since disappeared from Govee's list), and `size + 1` would then
+      // hand out an identifier that is already in use.
+      id = this.nextIdentifier;
+      this.nextIdentifier += 1;
       this.identifierByName.set(name, id);
       this.nameByIdentifier.set(id, name);
     }
     return id;
+  }
+
+  /**
+   * True once this device's real effect list is known - either discovered
+   * from gv2mqtt this run, or restored from the accessory cache. False means
+   * we are still on FALLBACK_EFFECT_NAMES and nothing should be persisted.
+   */
+  get effectsDiscovered(): boolean {
+    return this.effectsAreReal;
+  }
+
+  /** The catalog to persist: the full effect list plus the numbering Home knows. */
+  effectCatalog(): { effectNames: string[]; identifiers: Record<string, number> } {
+    return {
+      effectNames: this.state.effectNames,
+      identifiers: Object.fromEntries(this.identifierByName),
+    };
+  }
+
+  /**
+   * Reinstates a catalog saved on a previous run, before any HomeKit service
+   * is built from it. Two things have to come back, not one:
+   *
+   *  - the effect list, so the accessory is published with its real inputs
+   *    instead of FALLBACK_EFFECT_NAMES. Starting from the fallback and
+   *    swapping to the real list ~17s later is a change of the bridge's
+   *    configuration, and HomeKit answers a changed configuration by
+   *    re-reading every service the bridge has.
+   *  - the name->identifier map, which is the part that must not be
+   *    recomputed. Identifiers are handed out in first-seen order, so
+   *    seeding from the real list would number the effects differently than
+   *    the run that populated Home's own input cache - exactly the
+   *    desynchronisation d18342b exists to prevent. Restoring the map
+   *    reproduces the numbering Home already has, fallback-derived quirks
+   *    and all.
+   */
+  restoreEffectCatalog(effectNames: string[], identifiers: Record<string, number>): void {
+    if (effectNames.length === 0 || Object.keys(identifiers).length === 0) {
+      return;
+    }
+    this.identifierByName.clear();
+    this.nameByIdentifier.clear();
+    this.nextIdentifier = 1;
+    for (const [name, id] of Object.entries(identifiers)) {
+      this.identifierByName.set(name, id);
+      this.nameByIdentifier.set(id, name);
+      this.nextIdentifier = Math.max(this.nextIdentifier, id + 1);
+    }
+    this.identifierForName(NORMAL_LIGHT); // guarantee it exists even in an odd catalog
+    this.state.effectNames = effectNames;
+    this.effectsAreReal = true;
+    this.log.debug(
+      `[${this.config.name}] Restored ${effectNames.length - 1} effect(s) and their identifiers from the accessory cache`,
+    );
   }
 
   /** Reverse of identifierForName; undefined if that identifier hasn't been assigned yet. */
@@ -782,6 +843,7 @@ export class GoveeDevice extends EventEmitter {
     }
 
     this.state.effectNames = buildEffectNames(names);
+    this.effectsAreReal = true;
     for (const effectName of this.state.effectNames) {
       this.identifierForName(effectName);
     }

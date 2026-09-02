@@ -34,6 +34,15 @@ function subtypeForEffect(name: string): string {
  * discovers it from Govee's API - see GoveeDevice), so InputSource services
  * are reconciled reactively instead of being built once at startup.
  */
+/**
+ * What survives a restart in `accessory.context`, which Homebridge persists
+ * with the cached accessory and hands back through configureAccessory.
+ */
+interface EffectsContext {
+  effectNames?: string[];
+  identifiers?: Record<string, number>;
+}
+
 export class EffectsAccessory {
   private readonly service: Service;
   private appliedEffectNames: string[] | null = null;
@@ -44,6 +53,19 @@ export class EffectsAccessory {
     private readonly device: GoveeDevice,
   ) {
     const { Service: Svc, Characteristic } = this.platform;
+
+    // Before anything is built from it. gv2mqtt doesn't retain its discovery
+    // topic, so the real effect list only arrives ~17s into a run; without
+    // this the accessory is published with the fallback list and rebuilt
+    // when the real one lands. Rebuilding services changes the bridge's
+    // configuration, and HomeKit answers that by re-reading every service
+    // it has - measured at three configuration-number increments per
+    // restart on this bridge (349, 350, 351 on 2026-09-02) while no other
+    // bridge in the same Homebridge moved at all.
+    const cached = accessory.context as EffectsContext;
+    if (cached?.effectNames && cached.identifiers) {
+      device.restoreEffectCatalog(cached.effectNames, cached.identifiers);
+    }
 
     accessory
       .getService(Svc.AccessoryInformation)!
@@ -137,5 +159,33 @@ export class EffectsAccessory {
     this.service.updateCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
 
     this.appliedEffectNames = namesIn;
+    this.persistCatalog();
+  }
+
+  /**
+   * Saves the effect list and its numbering so the next run can publish the
+   * accessory in its final shape immediately. Only ever called with a real
+   * list - persisting the fallback would defeat the point, and on the very
+   * first run after upgrading there is nothing cached, so the catalog saved
+   * is the one this run ended up with: the numbering Home already knows.
+   * That is what keeps identifiers from shifting even once.
+   */
+  private persistCatalog(): void {
+    if (!this.device.effectsDiscovered) {
+      return;
+    }
+    const catalog = this.device.effectCatalog();
+    const cached = this.accessory.context as EffectsContext;
+    if (
+      cached.effectNames?.length === catalog.effectNames.length &&
+      cached.effectNames.every((n, i) => n === catalog.effectNames[i])
+    ) {
+      return;
+    }
+    this.accessory.context = catalog;
+    this.platform.api.updatePlatformAccessories([this.accessory]);
+    this.platform.log.debug(
+      `[${this.device.config.name}] Cached ${catalog.effectNames.length - 1} effect(s) for the next restart`,
+    );
   }
 }

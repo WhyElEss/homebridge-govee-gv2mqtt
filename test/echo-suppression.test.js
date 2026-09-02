@@ -483,3 +483,84 @@ test('a real brightness change still exits effect mode, once', async (t) => {
   assert.strictEqual(sent.length, 1, `expected one command, got ${sent.length}`);
   assert.strictEqual(sent[0].brightness, 42, 'and it carries the value the finger settled on');
 });
+
+const DISCOVERY_TOPIC = `homeassistant/light/gv2mqtt-${DEVICE_ID}/config`;
+
+function announceEffects(bridge, names) {
+  bridge.emit('message', DISCOVERY_TOPIC, Buffer.from(JSON.stringify({ effect_list: names })));
+}
+
+/**
+ * The point of the accessory-cache catalog: a run that starts already
+ * knowing the real effect list must not rebuild anything when gv2mqtt
+ * announces that same list ~17s later. A rebuild is what changes the
+ * bridge's configuration and makes HomeKit re-read every service - measured
+ * at three configuration-number increments per restart before this.
+ */
+test('a restored catalog makes the next discovery a no-op', async (t) => {
+  const first = new MockBridge();
+  t.after(() => first.stop());
+  const device = new GoveeDevice(first, deviceConfig(), 10000, silentLog);
+
+  const real = ['Night', 'Sunrise', 'Aurora'];
+  announceEffects(first, real);
+  assert.ok(device.effectsDiscovered, 'the first run discovers the list');
+  const catalog = device.effectCatalog();
+
+  // Next restart: the catalog comes back before anything is built from it.
+  const second = new MockBridge();
+  t.after(() => second.stop());
+  const restarted = new GoveeDevice(second, deviceConfig(), 10000, silentLog);
+  restarted.restoreEffectCatalog(catalog.effectNames, catalog.identifiers);
+
+  let changes = 0;
+  restarted.on('change', () => { changes += 1; });
+  announceEffects(second, real);
+
+  assert.strictEqual(changes, 0, 'an unchanged list must not announce a rebuild');
+  assert.deepStrictEqual(restarted.effectCatalog(), catalog, 'and the numbering is byte-for-byte the one Home knows');
+});
+
+/**
+ * Identifiers are Home's key into its own input cache, so a restored catalog
+ * must keep every number it had; only genuinely new effects get new ones.
+ */
+test('a restored catalog keeps its numbering when the list grows', async (t) => {
+  const first = new MockBridge();
+  t.after(() => first.stop());
+  const device = new GoveeDevice(first, deviceConfig(), 10000, silentLog);
+  announceEffects(first, ['Night', 'Sunrise']);
+  const catalog = device.effectCatalog();
+  const nightId = catalog.identifiers.Night;
+  const sunriseId = catalog.identifiers.Sunrise;
+
+  const second = new MockBridge();
+  t.after(() => second.stop());
+  const restarted = new GoveeDevice(second, deviceConfig(), 10000, silentLog);
+  restarted.restoreEffectCatalog(catalog.effectNames, catalog.identifiers);
+
+  let changes = 0;
+  restarted.on('change', () => { changes += 1; });
+  announceEffects(second, ['Night', 'Sunrise', 'Brand New DIY']);
+
+  assert.strictEqual(changes, 1, 'a genuinely changed list does rebuild');
+  const after = restarted.effectCatalog();
+  assert.strictEqual(after.identifiers.Night, nightId, 'existing identifiers must not move');
+  assert.strictEqual(after.identifiers.Sunrise, sunriseId);
+  const newId = after.identifiers['Brand New DIY'];
+  assert.ok(newId > 0 && newId !== nightId && newId !== sunriseId, `new effect got a colliding id: ${newId}`);
+});
+
+/** A catalog with a gap (an effect Govee has since dropped) must not collide. */
+test('a gappy restored catalog still hands out unused identifiers', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  // Identifier 2 is missing - "Normal Light" is 1, the survivor is 7.
+  device.restoreEffectCatalog(['Normal Light', 'Survivor'], { 'Normal Light': 1, Survivor: 7 });
+
+  const fresh = device.identifierForName('Newcomer');
+  assert.strictEqual(fresh, 8, `expected one past the highest in use, got ${fresh}`);
+  assert.strictEqual(device.nameForIdentifier(7), 'Survivor', 'the survivor keeps its number');
+});
