@@ -249,7 +249,7 @@ test('a color picked while the light is off survives being turned on', async (t)
   // Home's color picker: hue and saturation first...
   device.setHue(0);
   device.setSaturation(100);
-  await settle(80); // the 50ms hue/sat coalescing flush
+  await settle(420); // the shared coalescing window
 
   assert.strictEqual(bridge.published.length, 0, 'touching the color wheel must not wake an off lamp');
 
@@ -287,7 +287,7 @@ test('a lamp switched off while lit still comes back to normal light', async (t)
   device.setOn(true, 'lightbulb');
   device.setHue(0);
   device.setSaturation(100);
-  await settle(80);
+  await settle(420);
   assert.strictEqual(device.getState().mode, 'rgb');
   assert.ok(bridge.published.some((c) => c.color), 'a lit lamp gets the color immediately');
 
@@ -310,10 +310,10 @@ test('a white picked after a color on an off lamp wins', async (t) => {
 
   device.setHue(0);
   device.setSaturation(100);
-  await settle(80);
+  await settle(420);
 
   device.setSaturation(0); // back to white on the wheel
-  await settle(80);
+  await settle(420);
 
   device.setOn(true, 'lightbulb');
   assert.ok(!bridge.published.some((c) => c.color), 'the cancelled color must not come back');
@@ -347,7 +347,7 @@ test('a slider drag is coalesced into one command', async (t) => {
   assert.strictEqual(device.getState().brightness, 100, 'the cache follows every write immediately');
   assert.strictEqual(bridge.published.length, before, 'nothing is published mid-drag');
 
-  await settle(160);
+  await settle(420);
 
   const sent = bridge.published.slice(before);
   assert.deepStrictEqual(sent, [{ state: 'ON', brightness: 100 }], `26 writes must collapse to one, got ${sent.length}`);
@@ -362,14 +362,87 @@ test('a slow drag still tracks live', async (t) => {
   const before = bridge.published.length;
 
   device.setBrightness(40);
-  await settle(160);
+  await settle(420);
   device.setBrightness(80);
-  await settle(160);
+  await settle(420);
 
   assert.deepStrictEqual(bridge.published.slice(before), [
     { state: 'ON', brightness: 40 },
     { state: 'ON', brightness: 80 },
   ], 'writes further apart than the coalescing window still go out one by one');
+});
+
+/**
+ * The drag that defeated v0.7.7's sliding window: Home's slider writes are
+ * roughly 250ms apart, so every one of them outran a 100ms window that was
+ * rescheduled on each write. A fixed window collapses them whatever their
+ * spacing. Values and spacing are from the capture of 2026-09-02 11:31:25-28,
+ * which produced nine commands - four of them repeats of a value already sent.
+ */
+test('a drag at Home\'s real cadence is collapsed, not published per step', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setOn(true, 'lightbulb');
+  const before = bridge.published.length;
+
+  for (const value of [94, 53, 31, 22, 21, 21, 20, 20, 20]) {
+    device.setBrightness(value);
+    // Wider than v0.7.7's 100ms window and narrower than this one - the
+    // gap that made a sliding window publish every single write.
+    await settle(150);
+  }
+  await settle(420);
+
+  const sent = bridge.published.slice(before);
+  assert.ok(sent.length <= 3, `nine writes must not become nine commands, got ${sent.length}`);
+  assert.strictEqual(sent[sent.length - 1].brightness, 20, 'and the last one carries where the finger stopped');
+});
+
+/**
+ * The device stores hue and level independently - through the same capture
+ * the reports kept color:{r:128,g:0,b:255} while brightness walked 94 -> 21.
+ * Scaling the RGB by brightness as well dims it twice.
+ */
+test('colour goes out at full value, with brightness as its own field', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setOn(true, 'lightbulb');
+  device.setBrightness(17);
+  await settle(420);
+  const before = bridge.published.length;
+
+  device.setHue(270);
+  device.setSaturation(100);
+  await settle(420);
+
+  const sent = bridge.published.slice(before);
+  assert.strictEqual(sent.length, 1, `one command for one colour pick, got ${sent.length}`);
+  assert.deepStrictEqual(sent[0].color, { r: 128, g: 0, b: 255 }, 'full-value purple, not dimmed to (22,0,43)');
+  assert.strictEqual(sent[0].brightness, 17, 'the level travels in its own field');
+});
+
+/** A gesture that changes colour and brightness together is one command. */
+test('colour and brightness in one gesture become one command', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setOn(true, 'lightbulb');
+  await settle(420);
+  const before = bridge.published.length;
+
+  device.setHue(120);
+  device.setSaturation(100);
+  device.setBrightness(45);
+  await settle(420);
+
+  const sent = bridge.published.slice(before);
+  assert.strictEqual(sent.length, 1, `expected one command, got ${sent.length}`);
+  assert.deepStrictEqual(sent[0], { state: 'ON', color: { r: 0, g: 255, b: 0 }, brightness: 45 });
 });
 
 test('a drag that ends where it began does not cancel a running effect', async (t) => {
@@ -385,7 +458,7 @@ test('a drag that ends where it began does not cancel a running effect', async (
   device.setBrightness(40);
   device.setBrightness(10);
   device.setBrightness(100);
-  await settle(160);
+  await settle(420);
 
   assert.strictEqual(device.getState().mode, 'effect', 'the effect must survive a round-trip drag');
   assert.strictEqual(device.getState().effectIndex, night);
@@ -403,7 +476,7 @@ test('a real brightness change still exits effect mode, once', async (t) => {
   device.setBrightness(80);
   device.setBrightness(60);
   device.setBrightness(42);
-  await settle(160);
+  await settle(420);
 
   assert.strictEqual(device.getState().mode, 'adaptive', 'a real change backs out of the effect');
   const sent = bridge.published.slice(before);

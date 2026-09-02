@@ -203,16 +203,23 @@ inside the plugin the moment the switch is toggled.
 
 ## Behavior notes
 
-- **Optimistic cache window** (`optimisticCacheMs`, default 10000ms): a
-  locally-set brightness, color or color temperature is trusted for this
-  long before an incoming device report is allowed to overwrite it, so the
-  Home app doesn't flicker back to a stale value while the round trip to
-  the physical device completes — gv2mqtt's reports have been observed
-  still carrying the pre-command value six seconds after the command went
-  out. A device-reported "off" also only resets the cached effect/mode once
-  this window has passed, so a spurious transient "off" right after turning
-  a light on with an effect selected doesn't wipe that selection (see the
-  effect race note below for why that can happen).
+- **Optimistic cache window** (`optimisticCacheMs`, default 10000ms):
+  applied **per property**. A device report for a property is ignored while
+  either something newer for it is still waiting in the pending patch, or
+  we commanded that property within this window. gv2mqtt's reports run
+  several seconds behind and arrive out of order — one drag on 2026-09-02
+  was answered with 94, 53, 22, 31, 21 in that order, long after the finger
+  had settled on 20 — so anything inside the window is untrustworthy
+  whether or not it matches what was asked for. (This is where the same
+  gate in homebridge-yeelight-wifi deliberately differs: a Yeelight answers
+  on the LAN in ~90ms, so a *differing* value there really is news. Here it
+  is far more often a stale report still working its way out of Govee's
+  cloud, and believing it snaps the slider back to a position the finger
+  already left.) Scoping it per property is what keeps a brightness drag
+  from blinding the plugin to a colour changed in the Govee app at the same
+  moment. A device-reported "off" also only resets the cached effect/mode
+  once the window has passed, so a spurious transient "off" right after
+  turning a light on with an effect selected doesn't wipe that selection.
 - **Whose change is it** (on/off): power state can't simply be held for the
   window above — a press of the lamp's own button has to get through
   promptly. It's decided by intent instead: the plugin records *what it
@@ -232,21 +239,43 @@ inside the plugin the moment the switch is toggled.
   "on" report lands — and, worse than the flicker, from leaving `isOn`
   cached false, where a tap on the seemingly-off tile took the full
   power-on path and cancelled the effect just selected.
-- **Coalesced slider writes**: Home streams the slider position as a burst
-  of characteristic writes while a finger is moving — one drag captured on
-  2026-09-02 produced 27 brightness writes in three seconds. Publishing
-  each one gives gv2mqtt 27 separate Govee API calls to make and 27 state
-  reports to send back; the lamp was still working through that queue
-  eight seconds after the drag began, visibly trailing the slider. Both
-  brightness and the color wheel are therefore coalesced (~100ms and 50ms
-  trailing windows): the cached value moves with every write, so the Home
-  app and `onGet` are correct immediately, but only the value the finger
-  settled on goes on the wire. Writes further apart than the window still
-  go out one by one, so a slow drag still tracks live. Whether a
-  brightness change is real enough to back out of a running effect is
-  judged against the value from *before* the burst, so a drag that ends
-  where it started — or Home resending the same value — doesn't cancel an
-  effect.
+- **Coalesced writes** (`COALESCE_MS`, 350ms): Home streams the slider or
+  colour-wheel position as a burst of characteristic writes while a finger
+  is moving. Everything about the light's appearance — brightness, the
+  colour wheel, a deliberate colour temperature — merges into one pending
+  patch and leaves as **one** command. The cached value moves with every
+  write, so the Home app and `onGet` are correct immediately; only the wire
+  is coalesced. A gesture that changes colour *and* brightness is one
+  command, not two.
+
+  The window is **fixed, not sliding**: the timer is armed only when none is
+  running, so a continuous drag still reaches the lamp at a bounded rate
+  instead of going silent until the finger stops. v0.7.7 got this wrong by
+  rescheduling the timer on every write, which collapses a burst only while
+  the writes are closer together than the window — Home's are about 250ms
+  apart, so a 100ms sliding window published every single one. A drag
+  captured on 2026-09-02 still produced nine commands, four of them repeats
+  of a value already sent, and the lamp visibly stepped through the queue
+  for seconds afterwards. (The same design in
+  [homebridge-yeelight-wifi](https://github.com/WhyElEss/homebridge-yeelight-wifi)
+  uses 80ms, talking to a lamp on the LAN that answers in ~90ms; every
+  command here is a cloud round trip of about a second.)
+
+  Whether a brightness change is real enough to back out of a running
+  effect is judged against the value from *before* the burst, so a drag
+  that ends where it started — or Home resending the same value — doesn't
+  cancel an effect.
+- **Colour goes out at full value**: the device stores hue and level
+  independently — through a brightness drag the reports keep
+  `color:{r:128,g:0,b:255}` unchanged while `brightness` walks 94 → 21 — so
+  the RGB in a command carries hue and saturation only and the level
+  travels in its own `brightness` field. Before v0.8.0 the RGB was also
+  scaled by the current brightness, which baked the level into the colour
+  channel and then dimmed it a second time: a colour picked at 17% went out
+  as `{"color":{"r":22,"g":0,"b":43},"brightness":17}`. The white/colour
+  decision now reads the Saturation characteristic directly instead of
+  round-tripping through those scaled RGB values, where rounding at a low
+  brightness could flip it for the same colour.
 - **White vs. color heuristic** (`colorSaturationThreshold`, default
   `0.75`): when Home's color wheel is used, the resulting color's
   saturation decides whether it's sent to the device as a

@@ -41,6 +41,19 @@ interface IncomingMessage {
   effect?: string;
 }
 
+/**
+ * Which aspects of the light's appearance are waiting to be sent. Values are
+ * not carried here - they are written straight into `state` so that onGet and
+ * HomeKit are correct the instant the write lands; this only records what has
+ * to end up in the next command.
+ */
+interface DesiredPatch {
+  brightness?: boolean;
+  /** Hue and/or saturation; flush decides color-vs-white from them. */
+  colorWheel?: boolean;
+  colorTemp?: boolean;
+}
+
 interface DiscoveryConfigMessage {
   effect_list?: unknown;
 }
@@ -135,17 +148,26 @@ const AL_ACTIVATION_WINDOW_MS = 5000;
 const SCENE_BATCH_GRACE_MS = 2000;
 
 /**
- * How long to sit on a brightness write before publishing it. Home streams
- * the slider position as a burst of writes while a finger is moving: one
- * drag captured on 2026-09-02 produced 27 of them inside three seconds, and
- * every one was published as its own command, turned into its own Govee API
- * call by gv2mqtt, and echoed back as its own state report - the lamp was
- * still working through that queue eight seconds after the drag began,
- * visibly trailing the slider. The color wheel already gets this treatment
- * (see queueHueSat); at this scale it is invisible, and writes further apart
- * than this still go out one by one, so a slow drag still tracks live.
+ * The coalescing window for everything about the light's appearance -
+ * brightness, the color wheel, a deliberate color temperature. The first
+ * write opens the window, every write inside it merges into one pending
+ * patch, and one command goes out when it closes.
+ *
+ * **Fixed, not sliding.** The timer is only armed when none is running, so a
+ * continuous drag still reaches the lamp at a bounded rate instead of going
+ * silent until the finger stops. This is the mistake v0.7.7 made: it
+ * rescheduled the timer on every write, which collapses a burst only while
+ * the writes are closer together than the window. Home's slider writes
+ * arrive roughly every 250ms, so a 100ms sliding window published every
+ * single one - a drag captured on 2026-09-02 11:31 still produced nine
+ * commands, four of them repeats of a value already sent. Each becomes its
+ * own Govee API call, and the lamp visibly steps through the queue.
+ *
+ * Longer than the 80ms the same design uses in homebridge-yeelight-wifi,
+ * which talks to a lamp on the LAN that answers in ~90ms; here every command
+ * is a cloud round trip of about a second.
  */
-const BRIGHTNESS_COALESCE_MS = 100;
+const COALESCE_MS = 350;
 
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
@@ -166,10 +188,20 @@ const DEFAULT_STATE: GoveeDeviceState = {
  */
 export class GoveeDevice extends EventEmitter {
   private state: GoveeDeviceState = { ...DEFAULT_STATE };
-  private lastLocalSetAt = 0;
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
-  private hueSatFlushTimer?: NodeJS.Timeout;
-  private brightnessFlushTimer?: NodeJS.Timeout;
+  private flushTimer?: NodeJS.Timeout;
+  /**
+   * What the user has touched but we have not sent yet. Merged, not queued:
+   * a second write to the same aspect inside the window replaces the first
+   * rather than adding a command. Null when nothing is pending.
+   */
+  private desired: DesiredPatch | null = null;
+  /**
+   * The last value we asked the device for, per property, stamped when the
+   * command went out. Used to recognise that device's report as our own
+   * command coming back - see accepts().
+   */
+  private readonly commanded = new Map<string, { at: number }>();
   /**
    * The brightness this device had when the current burst of slider writes
    * started, or null when no burst is pending. What "the user really changed
@@ -290,8 +322,44 @@ export class GoveeDevice extends EventEmitter {
     this.log.debug(`[${this.config.name}] Adaptive Lighting transition (re)configured by a controller`);
   }
 
-  private withinOptimisticWindow(): boolean {
-    return Date.now() - this.lastLocalSetAt < this.optimisticCacheMs;
+  /**
+   * Whether a device-reported value for one property should be believed, or
+   * dropped as our own command coming back at us. Two reasons to drop it:
+   *
+   *  - something newer for that property is still sitting in `desired`,
+   *    waiting to go out. Whatever the device is telling us is by definition
+   *    older than what the user has already asked for.
+   *  - we commanded that property within `optimisticCacheMs`. gv2mqtt's
+   *    reports run several seconds behind and arrive out of order - one drag
+   *    on 2026-09-02 was answered with 94, 53, 22, 31, 21 in that order,
+   *    long after we had settled on 20 - so anything inside the window is
+   *    untrustworthy whether or not it matches what we asked for.
+   *
+   * That last point is where this deliberately differs from the same gate in
+   * homebridge-yeelight-wifi, which lets a *differing* value through as a
+   * genuine out-of-band change. A Yeelight answers on the LAN in about 90ms,
+   * so a differing value really is news; here it is far more often a stale
+   * report still working its way out of Govee's cloud, and believing it
+   * snaps the slider back to a position the finger already left.
+   *
+   * Scoping it per property is the improvement over the blanket window this
+   * replaces: a brightness drag no longer blinds us to a color change made
+   * in the Govee app at the same moment.
+   */
+  private accepts(prop: 'on' | 'brightness' | 'color_temp' | 'color' | 'effect'): boolean {
+    if (this.desired) {
+      if (prop === 'brightness' && this.desired.brightness) {
+        return false;
+      }
+      if ((prop === 'color' || prop === 'color_temp') && (this.desired.colorWheel || this.desired.colorTemp)) {
+        return false;
+      }
+    }
+    const commanded = this.commanded.get(prop);
+    if (!commanded) {
+      return true;
+    }
+    return Date.now() - commanded.at >= this.optimisticCacheMs;
   }
 
   private publish(payload: Record<string, unknown>): void {
@@ -307,12 +375,21 @@ export class GoveeDevice extends EventEmitter {
     // the report as an echo. See isEchoOfOurOwnOn.
     this.lastCommandedOn = payload.state === 'ON';
     this.lastPublishAt = Date.now();
+    // Stamped as the command goes out, for the same reason lastCommandedOn is
+    // (see above): a report of the change can reach us in the same socket
+    // read as the confirmation of the command that caused it.
+    const at = Date.now();
+    this.commanded.set('on', { at });
+    for (const prop of ['brightness', 'color_temp', 'color', 'effect']) {
+      if (payload[prop] !== undefined) {
+        this.commanded.set(prop, { at });
+      }
+    }
     this.log.debug(`[${this.config.name}] Publishing MQTT: ${this.config.commandTopic} = ${JSON.stringify(payload)}`);
     this.client.publish(this.config.commandTopic, JSON.stringify(payload));
   }
 
   private markLocalChange(): void {
-    this.lastLocalSetAt = Date.now();
     // Every deliberate local command also supersedes the AL-nudge
     // bookkeeping: lastAlCommandAt must mean "the LAST command we sent was a
     // background AL nudge", because that's the only context in which the
@@ -352,6 +429,110 @@ export class GoveeDevice extends EventEmitter {
   private publishEffect(name: string): void {
     this.lastColorCommandAt = Date.now();
     this.publish({ state: 'ON', effect: name });
+  }
+
+  /**
+   * Merges one aspect of the light's appearance into the pending patch and
+   * arms the coalescing window if it isn't already running. See
+   * COALESCE_MS for why the timer is fixed rather than rescheduled.
+   */
+  private queueAppearance(patch: DesiredPatch): void {
+    this.desired = { ...(this.desired ?? {}), ...patch };
+    if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => this.flushAppearance(), COALESCE_MS);
+    }
+  }
+
+  /**
+   * Drops whatever appearance change is pending. Used by the paths that
+   * publish a complete command of their own (power, effects, alerts) and so
+   * already carry, or deliberately override, everything the patch held.
+   */
+  private discardPendingAppearance(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    this.desired = null;
+    this.brightnessBeforeBurst = null;
+  }
+
+  /**
+   * Turns the pending patch into exactly one command. Everything the user
+   * touched inside the window rides along: a gesture that changed the color
+   * and the brightness is one command, not two.
+   */
+  private flushAppearance(): void {
+    this.flushTimer = undefined;
+    const patch = this.desired;
+    const before = this.brightnessBeforeBurst;
+    this.desired = null;
+    this.brightnessBeforeBurst = null;
+    if (!patch) {
+      return;
+    }
+
+    if (!this.state.isOn) {
+      // Switched off (physical button, HomeKit, an alert) while the window
+      // was open. Every command shape carries state:"ON", so sending one
+      // now would light the lamp back up. A color picked on a lamp that was
+      // already off is remembered instead - see colorChosenWhileOff.
+      this.log.debug(`[${this.config.name}] Dropping deferred appearance change - the light is off`);
+      return;
+    }
+
+    const payload: Record<string, unknown> = { state: 'ON' };
+
+    if (patch.colorWheel) {
+      if (this.state.mode === 'rgb') {
+        payload.color = this.currentRgb();
+      } else {
+        payload.color_temp = this.state.mireds;
+      }
+    } else if (patch.colorTemp) {
+      payload.color_temp = this.state.mireds;
+    } else if (patch.brightness && this.state.mode === 'effect') {
+      if (before === this.state.brightness) {
+        // HomeKit resends the last-known brightness right after turning a
+        // light on (e.g. as part of the same automation transaction that
+        // also just selected an effect via the Effects accessory), and a
+        // drag can end back where it started. Treat either as the no-op it
+        // is, not as the user explicitly backing out of the effect.
+        this.log.debug(`[${this.config.name}] flushAppearance: no-op brightness resend, staying in effect mode`);
+        return;
+      }
+      this.log.debug(`[${this.config.name}] flushAppearance: exiting effect mode (real brightness change)`);
+      this.resetToNormalLight();
+      payload.color_temp = this.state.mireds;
+    }
+
+    if (patch.brightness || payload.color !== undefined || payload.color_temp !== undefined) {
+      // gv2mqtt maps each field onto its own Govee API call, so brightness
+      // only rides along when it was actually touched - or when the command
+      // sets a color/temperature anyway, where Govee needs it to scale the
+      // result.
+      payload.brightness = this.state.brightness;
+    }
+
+    this.publish(payload);
+    this.emit('change', this.getState());
+  }
+
+  /**
+   * The device-facing RGB for the currently cached hue and saturation, at
+   * **full value**. Brightness is a separate field in every command shape
+   * (and a separate Govee API call behind gv2mqtt): the device stores hue
+   * and level independently, which is visible on the wire - through a
+   * brightness drag on 2026-09-02 the reports kept `color:{r:128,g:0,b:255}`
+   * unchanged while `brightness` walked 94 -> 53 -> 31 -> 22 -> 21. Scaling
+   * the RGB by brightness as well, which is what this plugin used to do,
+   * bakes the level into the color channel and then dims it a second time -
+   * a color picked at 17% went out as `{"color":{"r":22,"g":0,"b":43"},
+   * "brightness":17}`. Same conclusion as homebridge-yeelight-wifi, which
+   * sends hue/saturation and ignores rgb entirely.
+   */
+  private currentRgb(): RGB {
+    return hueSatToRgb(this.state.hue, this.state.saturation, 100);
   }
 
   /**
@@ -525,7 +706,7 @@ export class GoveeDevice extends EventEmitter {
 
   private applyReportedState(msg: IncomingMessage, reportedOn: boolean): void {
     this.state.isOn = reportedOn;
-    if (!this.state.isOn && !this.withinOptimisticWindow()) {
+    if (!this.state.isOn && this.accepts('effect')) {
       // Only trust an "off" report enough to reset mode/effect bookkeeping
       // once we're past the optimistic window. gv2mqtt/Govee's cloud can
       // report a spurious/transient "off" a moment after we've just
@@ -536,7 +717,14 @@ export class GoveeDevice extends EventEmitter {
       this.resetToNormalLight();
     }
 
-    if (this.state.isOn && !this.withinOptimisticWindow()) {
+    if (!this.state.isOn) {
+      return;
+    }
+
+    // Each property is judged on its own now (see accepts): a report that
+    // is only echoing the brightness we just sent can still tell us about a
+    // color someone changed in the Govee app at the same moment.
+    if (this.accepts('effect') && this.accepts('color') && this.accepts('color_temp')) {
       if (msg.effect) {
         this.state.mode = 'effect';
         this.state.effectIndex = this.identifierForName(msg.effect);
@@ -552,9 +740,9 @@ export class GoveeDevice extends EventEmitter {
           this.state.saturation = hs.saturation;
         }
       }
-      if (typeof msg.brightness === 'number') {
-        this.state.brightness = msg.brightness;
-      }
+    }
+    if (typeof msg.brightness === 'number' && this.accepts('brightness')) {
+      this.state.brightness = msg.brightness;
     }
   }
 
@@ -628,6 +816,7 @@ export class GoveeDevice extends EventEmitter {
           `[${this.config.name}] setOn: redundant Lightbulb ON while in ${this.state.mode} mode - returning to normal light`,
         );
         this.markLocalChange();
+        this.discardPendingAppearance();
         this.resetToNormalLight();
         this.publishColorTemp(this.state.mireds, this.state.brightness);
         this.emit('change', this.getState());
@@ -649,7 +838,7 @@ export class GoveeDevice extends EventEmitter {
 
     if (on && this.state.mode === 'rgb' && this.colorChosenWhileOff) {
       // Coming on in a color that was picked while this lamp was off.
-      // flushHueSat can only record such a choice - publishing it there
+      // resolveHueSat can only record such a choice - publishing it there
       // would wake a lamp the user left off - so without this the usual
       // resetToNormalLight()/publishColorTemp() below would overwrite the
       // color with white before it was ever sent. That is what the user
@@ -661,13 +850,14 @@ export class GoveeDevice extends EventEmitter {
       // long they take over it. It survives only until the light next comes
       // on, or until something deliberately returns the lamp to normal
       // light (see resetToNormalLight).
-      const { r, g, b } = hueSatToRgb(this.state.hue, this.state.saturation, this.state.brightness);
+      this.discardPendingAppearance();
       this.colorChosenWhileOff = false;
-      this.publishRgb({ r, g, b }, this.state.brightness);
+      this.publishRgb(this.currentRgb(), this.state.brightness);
       this.emit('change', this.getState());
       return;
     }
 
+    this.discardPendingAppearance();
     this.resetToNormalLight();
     if (on) {
       this.publishColorTemp(this.state.mireds, this.state.brightness);
@@ -699,42 +889,7 @@ export class GoveeDevice extends EventEmitter {
       return;
     }
 
-    if (this.brightnessFlushTimer) {
-      clearTimeout(this.brightnessFlushTimer);
-    }
-    this.brightnessFlushTimer = setTimeout(() => this.flushBrightness(), BRIGHTNESS_COALESCE_MS);
-  }
-
-  private flushBrightness(): void {
-    this.brightnessFlushTimer = undefined;
-    const before = this.brightnessBeforeBurst;
-    this.brightnessBeforeBurst = null;
-
-    if (!this.state.isOn) {
-      // Switched off (physical button, HomeKit, an alert) while the burst
-      // was settling. Every command shape below carries state:"ON", so
-      // sending one now would light the lamp back up.
-      this.log.debug(`[${this.config.name}] Dropping deferred brightness - the light is off`);
-      return;
-    }
-
-    if (this.state.mode === 'effect') {
-      if (before === this.state.brightness) {
-        // HomeKit resends the last-known brightness right after turning a
-        // light on (e.g. as part of the same automation transaction that
-        // also just selected an effect via the Effects accessory), and a
-        // drag can end back where it started. Treat either as the no-op it
-        // is, not as the user explicitly backing out of the effect.
-        this.log.debug(`[${this.config.name}] flushBrightness: no-op resend, staying in effect mode`);
-        return;
-      }
-      this.log.debug(`[${this.config.name}] flushBrightness: exiting effect mode (real brightness change)`);
-      this.resetToNormalLight();
-      this.publishColorTemp(this.state.mireds, this.state.brightness);
-    } else {
-      this.publish({ state: 'ON', brightness: this.state.brightness });
-    }
-    this.emit('change', this.getState());
+    this.queueAppearance({ brightness: true });
   }
 
   setColorTemperature(mireds: number, fromAdaptiveLighting = false): void {
@@ -754,7 +909,7 @@ export class GoveeDevice extends EventEmitter {
       // Lighting's automatic background writes get the mode checks below.
       this.markLocalChange();
       this.resetToNormalLight();
-      this.publishColorTemp(this.state.mireds, this.state.brightness);
+      this.queueAppearance({ colorTemp: true });
       this.emit('change', this.getState());
       return;
     }
@@ -832,18 +987,24 @@ export class GoveeDevice extends EventEmitter {
     this.queueHueSat({ saturation });
   }
 
+  /**
+   * Home sends Hue and Saturation as two separate writes, and streams both
+   * while the color wheel is being dragged. The values are resolved into
+   * `state` at once (so onGet is right) and the command rides the shared
+   * coalescing window with any brightness change from the same gesture.
+   */
   private queueHueSat(partial: { hue?: number; saturation?: number }): void {
     this.pendingHueSat = { ...this.pendingHueSat, ...partial };
-    if (this.hueSatFlushTimer) {
-      clearTimeout(this.hueSatFlushTimer);
-    }
-    // Home sends Hue and Saturation as two separate characteristic writes when
-    // dragging the color wheel; coalesce them into a single command instead of
-    // publishing (and deciding color-vs-white) twice.
-    this.hueSatFlushTimer = setTimeout(() => this.flushHueSat(), 50);
+    this.resolveHueSat();
+    this.queueAppearance({ colorWheel: true });
   }
 
-  private flushHueSat(): void {
+  /**
+   * Folds a pending hue/saturation pair into `state` and decides what the
+   * light is now in - a true color, or a "white" the color wheel expresses
+   * as a low-saturation color. Publishes nothing; flushAppearance does that.
+   */
+  private resolveHueSat(): void {
     if (!this.pendingHueSat) {
       return;
     }
@@ -855,16 +1016,16 @@ export class GoveeDevice extends EventEmitter {
     this.state.hue = hue;
     this.state.saturation = saturation;
 
-    const { r, g, b } = hueSatToRgb(hue, saturation, this.state.brightness);
-    const mx = Math.max(r, g, b);
-    const mn = Math.min(r, g, b);
-    const sat = mx > 0 ? (mx - mn) / mx : 0;
-    const bri = Math.round((mx / 255) * 100) || 1;
-    this.state.brightness = bri;
-
-    if (sat < this.config.colorSaturationThreshold) {
-      // Low saturation: Home's color wheel was used to pick a "white", so send
-      // it to the device as a color-temperature command instead of RGB.
+    // Taken straight from the characteristic rather than round-tripped
+    // through RGB: the old `(max - min) / max` was the same number, but
+    // computed from 0-255 values that had been scaled by brightness, so at
+    // a low brightness rounding could shift it across the threshold and
+    // flip the white/color decision for the same color.
+    if (saturation / 100 < this.config.colorSaturationThreshold) {
+      // Home's color wheel was used to pick a "white", so it goes to the
+      // device as a color temperature instead of RGB.
+      const { r, g, b } = hueSatToRgb(hue, saturation, 100);
+      void g;
       const ratio = r > 0 ? b / r : 0.5;
       const mireds = Math.round(
         Math.max(this.config.minMireds, Math.min(this.config.maxMireds, 500 - ratio * 390)),
@@ -876,22 +1037,16 @@ export class GoveeDevice extends EventEmitter {
       // that picking a white on an off lamp also cancels a color picked on
       // it a moment earlier (resetToNormalLight clears colorChosenWhileOff).
       this.resetToNormalLight();
-      if (this.state.isOn) {
-        this.publishColorTemp(mireds, bri);
-      }
     } else {
-      // The mode and the timestamp are recorded whether or not the light is
-      // on: picking a color on a light that's off is still a color choice,
-      // and Home sends Hue/Saturation *before* the On write, so setOn has to
-      // be able to see that a color was just asked for. Only the command
-      // itself is withheld - touching the color wheel must not wake a lamp
-      // the user left off.
+      // The mode is recorded whether or not the light is on: picking a color
+      // on a light that's off is still a color choice, and Home sends
+      // Hue/Saturation *before* the On write, so setOn has to be able to see
+      // that a color was just asked for. Only the command is withheld -
+      // touching the color wheel must not wake a lamp the user left off.
       this.state.mode = 'rgb';
       this.state.effectIndex = 1;
       this.lastColorCommandAt = Date.now();
-      if (this.state.isOn) {
-        this.publishRgb({ r, g, b }, bri);
-      } else {
+      if (!this.state.isOn) {
         this.colorChosenWhileOff = true;
       }
     }
@@ -903,6 +1058,7 @@ export class GoveeDevice extends EventEmitter {
     this.log.debug(`[${this.config.name}] setEffectIndex(${index}) -> "${name}"`);
     this.disarmOffWatchdog();
     this.markLocalChange();
+    this.discardPendingAppearance();
     // HomeKit doesn't guarantee whether Active or ActiveIdentifier arrives
     // first when an automation turns the light on with an effect selected.
     // Marking isOn true here (regardless of branch) means that whichever of
@@ -967,6 +1123,7 @@ export class GoveeDevice extends EventEmitter {
 
     this.disarmOffWatchdog();
     this.markLocalChange();
+    this.discardPendingAppearance();
     this.state.isOn = true;
     this.state.mode = 'rgb';
     this.state.hue = hue;
@@ -974,7 +1131,7 @@ export class GoveeDevice extends EventEmitter {
     this.state.brightness = brightness;
     this.state.alertActive = true;
 
-    this.publishRgb(hueSatToRgb(hue, saturation, brightness), brightness);
+    this.publishRgb(hueSatToRgb(hue, saturation, 100), brightness);
     this.emit('change', this.getState());
   }
 
@@ -999,6 +1156,7 @@ export class GoveeDevice extends EventEmitter {
       this.disarmOffWatchdog();
     }
     this.markLocalChange();
+    this.discardPendingAppearance();
     Object.assign(this.state, snap);
 
     if (!snap.isOn) {
@@ -1006,7 +1164,7 @@ export class GoveeDevice extends EventEmitter {
     } else if (snap.mode === 'effect') {
       this.publishEffect(this.nameForIdentifier(snap.effectIndex) ?? NORMAL_LIGHT);
     } else if (snap.mode === 'rgb') {
-      this.publishRgb(hueSatToRgb(snap.hue, snap.saturation, snap.brightness), snap.brightness);
+      this.publishRgb(hueSatToRgb(snap.hue, snap.saturation, 100), snap.brightness);
     } else {
       this.publishColorTemp(snap.mireds, snap.brightness);
     }
