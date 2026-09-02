@@ -163,6 +163,19 @@ export class GoveeDevice extends EventEmitter {
   private lastColorCommandAt = 0;
   private lastPublishAt = 0;
   private lastCommandedOn = false;
+  /**
+   * A color chosen on a light that was ALREADY off - a deliberate "next time
+   * this comes on, come on like this", which is what the user is doing when
+   * they switch the lamp off, pick a color, and only then reach for the
+   * power or brightness control. That intent has no natural deadline (they
+   * look at the tile, then act), so unlike lastColorCommandAt it is a flag
+   * rather than a timestamp. The color of a lamp that was switched off while
+   * lit is deliberately NOT remembered this way: turning that one back on
+   * still returns it to normal light, which is what the Adaptive-Lighting
+   * scene handling relies on. Cleared by resetToNormalLight(), i.e. by
+   * anything that deliberately puts the lamp back to normal light.
+   */
+  private colorChosenWhileOff = false;
   private lastSentMireds = -1;
   private offEnforceUntil = 0;
   private offEnforceAttempts = 0;
@@ -330,6 +343,7 @@ export class GoveeDevice extends EventEmitter {
   private resetToNormalLight(): void {
     this.state.mode = 'adaptive';
     this.state.effectIndex = 1;
+    this.colorChosenWhileOff = false;
   }
 
   private handleMessage(payload: string): void {
@@ -610,16 +624,22 @@ export class GoveeDevice extends EventEmitter {
     this.markLocalChange();
     this.state.isOn = on;
 
-    if (on && this.hasFreshColorIntent()) {
-      // Powering on as the tail of one gesture that also picked a color.
-      // Home writes Hue and Saturation before On when a color is chosen on
-      // a light that's off, and flushHueSat can only record that choice -
-      // publishing it there would wake a lamp the user left off. Turning on
-      // with the usual resetToNormalLight()/publishColorTemp() here would
-      // then overwrite the color with white before it was ever sent, which
-      // is exactly what the user saw: red at 100% on an off lamp came up as
-      // plain Adaptive Lighting, with no color command on the wire at all.
+    if (on && this.state.mode === 'rgb' && this.colorChosenWhileOff) {
+      // Coming on in a color that was picked while this lamp was off.
+      // flushHueSat can only record such a choice - publishing it there
+      // would wake a lamp the user left off - so without this the usual
+      // resetToNormalLight()/publishColorTemp() below would overwrite the
+      // color with white before it was ever sent. That is what the user
+      // saw: red at 100% on an off lamp came up as plain Adaptive Lighting,
+      // with no color command on the wire at all.
+      //
+      // No deadline on the intent: picking a color and then reaching for
+      // the power or brightness control is one action to the user, however
+      // long they take over it. It survives only until the light next comes
+      // on, or until something deliberately returns the lamp to normal
+      // light (see resetToNormalLight).
       const { r, g, b } = hueSatToRgb(this.state.hue, this.state.saturation, this.state.brightness);
+      this.colorChosenWhileOff = false;
       this.publishRgb({ r, g, b }, this.state.brightness);
       this.emit('change', this.getState());
       return;
@@ -634,17 +654,6 @@ export class GoveeDevice extends EventEmitter {
     this.emit('change', this.getState());
   }
 
-  /**
-   * True when a color was chosen within the same batch of characteristic
-   * writes that is now turning the light on - the same SCENE_BATCH_GRACE_MS
-   * window that keeps a scene's own On write from wiping the color it just
-   * set. Deliberately narrow: a lamp that has simply been sitting off comes
-   * back to normal light exactly as before, because lastColorCommandAt will
-   * be long stale by then.
-   */
-  private hasFreshColorIntent(): boolean {
-    return this.state.mode === 'rgb' && Date.now() - this.lastColorCommandAt <= SCENE_BATCH_GRACE_MS;
-  }
 
   setBrightness(brightness: number): void {
     const rounded = Math.round(brightness);
@@ -810,11 +819,13 @@ export class GoveeDevice extends EventEmitter {
         Math.max(this.config.minMireds, Math.min(this.config.maxMireds, 500 - ratio * 390)),
       );
       this.state.mireds = mireds;
+      // A color-wheel write is always deliberate (user or a scene with a
+      // stored color) - it exits an active effect, same as a deliberate
+      // color-temperature write. Done whether or not the light is on, so
+      // that picking a white on an off lamp also cancels a color picked on
+      // it a moment earlier (resetToNormalLight clears colorChosenWhileOff).
+      this.resetToNormalLight();
       if (this.state.isOn) {
-        // A color-wheel write is always deliberate (user or a scene with a
-        // stored color) - it exits an active effect, same as a deliberate
-        // color-temperature write.
-        this.resetToNormalLight();
         this.publishColorTemp(mireds, bri);
       }
     } else {
@@ -829,6 +840,8 @@ export class GoveeDevice extends EventEmitter {
       this.lastColorCommandAt = Date.now();
       if (this.state.isOn) {
         this.publishRgb({ r, g, b }, bri);
+      } else {
+        this.colorChosenWhileOff = true;
       }
     }
     this.emit('change', this.getState());

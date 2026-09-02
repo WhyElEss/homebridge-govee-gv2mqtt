@@ -253,7 +253,10 @@ test('a color picked while the light is off survives being turned on', async (t)
 
   assert.strictEqual(bridge.published.length, 0, 'touching the color wheel must not wake an off lamp');
 
-  // ...then brightness and the power write, ~2s later in the real capture.
+  // ...then, well after any same-gesture grace window, the user reaches for
+  // the power control. The intent has no deadline: picking a color and then
+  // turning the lamp on is one action however long they take over it.
+  await settle(2200);
   device.setBrightness(3);
   device.setOn(true, 'lightbulb');
 
@@ -269,7 +272,38 @@ test('a color picked while the light is off survives being turned on', async (t)
   assert.strictEqual(device.getState().mode, 'rgb');
 });
 
-test('a light that has simply been sitting off still comes back to normal light', async (t) => {
+/**
+ * The other direction, and the reason the intent is only remembered when the
+ * color was picked on an already-off lamp: a lamp switched off while lit must
+ * still come back to normal light. The Adaptive-Lighting scene handling
+ * depends on that, so this is the behaviour the widened intent must not eat.
+ */
+test('a lamp switched off while lit still comes back to normal light', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  // On, and coloured red while it was on.
+  device.setOn(true, 'lightbulb');
+  device.setHue(0);
+  device.setSaturation(100);
+  await settle(80);
+  assert.strictEqual(device.getState().mode, 'rgb');
+  assert.ok(bridge.published.some((c) => c.color), 'a lit lamp gets the color immediately');
+
+  device.setOn(false, 'lightbulb');
+  const afterOff = bridge.published.length;
+
+  device.setOn(true, 'lightbulb');
+  assert.ok(
+    !bridge.published.slice(afterOff).some((c) => c.color),
+    'the color of a lamp switched off while lit is not restored on power-on',
+  );
+  assert.strictEqual(device.getState().mode, 'adaptive');
+});
+
+/** Picking a white on an off lamp cancels a color picked on it a moment before. */
+test('a white picked after a color on an off lamp wins', async (t) => {
   const bridge = new MockBridge();
   t.after(() => bridge.stop());
   const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
@@ -278,16 +312,11 @@ test('a light that has simply been sitting off still comes back to normal light'
   device.setSaturation(100);
   await settle(80);
 
-  // Well past SCENE_BATCH_GRACE_MS: this power-on has nothing to do with
-  // that color choice, so the pre-existing "on returns to normal light"
-  // behaviour must be untouched.
-  await settle(2100);
-  device.setOn(true, 'lightbulb');
+  device.setSaturation(0); // back to white on the wheel
+  await settle(80);
 
-  assert.ok(
-    !bridge.published.some((c) => c.color),
-    'a stale color intent must not colour a plain power-on',
-  );
-  assert.deepStrictEqual(bridge.published, [{ state: 'ON', color_temp: 250, brightness: 100 }]);
+  device.setOn(true, 'lightbulb');
+  assert.ok(!bridge.published.some((c) => c.color), 'the cancelled color must not come back');
+  assert.ok(bridge.published.some((c) => typeof c.color_temp === 'number'));
   assert.strictEqual(device.getState().mode, 'adaptive');
 });
