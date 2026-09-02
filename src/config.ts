@@ -9,6 +9,13 @@ export interface DeviceConfig {
   maxMireds?: number;
   adaptiveLighting?: boolean;
   enableEffects?: boolean;
+  /**
+   * Which of this device's effects appear as Inputs on its Effects
+   * accessory. Empty or absent means "all of them", capped at the HomeKit
+   * limit. Managed by the plugin's own settings UI (see homebridge-ui),
+   * which lists every effect gv2mqtt has discovered for this specific lamp.
+   */
+  visibleEffects?: string[];
   colorSaturationThreshold?: number;
   turnOffOnStartup?: boolean;
   turnOffOnStartupDelayMs?: number;
@@ -80,6 +87,7 @@ export interface ResolvedDeviceConfig {
   maxMireds: number;
   adaptiveLighting: boolean;
   enableEffects: boolean;
+  visibleEffects: string[];
   colorSaturationThreshold: number;
   turnOffOnStartup: boolean;
   turnOffOnStartupDelayMs: number;
@@ -105,6 +113,7 @@ export function resolveDeviceConfig(
     maxMireds: device.maxMireds ?? 500,
     adaptiveLighting: device.adaptiveLighting ?? true,
     enableEffects: device.enableEffects ?? true,
+    visibleEffects: device.visibleEffects ?? [],
     colorSaturationThreshold: device.colorSaturationThreshold ?? 0.75,
     turnOffOnStartup: device.turnOffOnStartup ?? false,
     turnOffOnStartupDelayMs: device.turnOffOnStartupDelayMs ?? 10000,

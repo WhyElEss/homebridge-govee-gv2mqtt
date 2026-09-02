@@ -1,0 +1,210 @@
+<style>
+  .gv-intro { margin-bottom: 1rem; }
+  .gv-device { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: 1rem; }
+  .gv-device-head {
+    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap;
+    padding: .6rem .85rem; border-bottom: 1px solid rgba(128,128,128,.25);
+  }
+  .gv-device-head h5 { margin: 0; font-size: 1rem; }
+  .gv-count { font-variant-numeric: tabular-nums; margin-left: auto; font-size: .85rem; opacity: .8; }
+  .gv-count.gv-full { color: #d9534f; opacity: 1; font-weight: 600; }
+  .gv-actions { display: flex; gap: .4rem; }
+  .gv-actions button { font-size: .78rem; padding: .1rem .5rem; }
+  .gv-list {
+    max-height: 17rem; overflow-y: auto; padding: .5rem .85rem;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .1rem .75rem;
+  }
+  .gv-item { display: flex; align-items: center; gap: .45rem; padding: .12rem 0; font-size: .87rem; }
+  .gv-item input { margin: 0; flex: none; }
+  .gv-item.gv-disabled { opacity: .45; }
+  .gv-empty { padding: .85rem; font-size: .88rem; }
+  .gv-note { font-size: .82rem; opacity: .75; margin-top: .35rem; }
+</style>
+
+<div class="gv-intro">
+  <p class="mb-1">
+    Choose which of each lamp’s effects appear as inputs on its <strong>Effects</strong> accessory
+    in the Home app. Everything else about the plugin is on the regular settings form.
+  </p>
+  <p class="gv-note mb-0" id="gv-cap-note"></p>
+</div>
+
+<div id="gv-devices"></div>
+
+<div class="gv-empty" id="gv-empty" style="display:none">
+  No effect lists cached yet. Homebridge needs to run this plugin once with your lamps reachable —
+  gv2mqtt publishes each device’s real effect list a few seconds after startup, and the plugin
+  remembers it. Restart Homebridge, then reopen this page.
+</div>
+
+<script>
+  (async () => {
+    // Mirrors MAX_SELECTABLE_EFFECTS in src/effects-accessory.ts: HomeKit
+    // caps an accessory at 100 services, two go to the accessory info and
+    // the television itself, and one input is always "Normal Light".
+    const MAX_SELECTABLE = 97;
+
+    // With customUi the standard settings form is no longer rendered on its
+    // own, so it has to be asked for - without this every other setting
+    // (broker URL, the device list, Adaptive Lighting) would be unreachable.
+    homebridge.showSchemaForm();
+
+    const devicesEl = document.getElementById('gv-devices');
+    const emptyEl = document.getElementById('gv-empty');
+    document.getElementById('gv-cap-note').textContent =
+      'HomeKit allows at most ' + MAX_SELECTABLE + ' effects per lamp. Selecting none means \u201cshow them all\u201d, ' +
+      'which is the default and is truncated at that limit. Changes take effect when you press Save.';
+
+    homebridge.showSpinner();
+    let catalogs;
+    let config;
+    try {
+      catalogs = await homebridge.request('/effects');
+      config = await homebridge.getPluginConfig();
+    } catch (err) {
+      homebridge.hideSpinner();
+      homebridge.toast.error(err.message || String(err), 'Could not load effects');
+      return;
+    }
+    homebridge.hideSpinner();
+
+    const byId = new Map((catalogs.devices || []).map((d) => [d.deviceId, d.effects]));
+    const configured = ((config[0] || {}).devices) || [];
+
+    // Only lamps that are both configured and have a cached catalog can be
+    // offered: without the catalog there is nothing to list, and without the
+    // config entry there is nowhere to save the choice.
+    const rows = configured
+      .map((device) => ({
+        deviceId: device.deviceId,
+        name: device.name || device.deviceId,
+        effects: byId.get(device.deviceId),
+        selected: new Set(Array.isArray(device.visibleEffects) ? device.visibleEffects : []),
+      }))
+      .filter((row) => Array.isArray(row.effects) && row.effects.length > 0);
+
+    if (rows.length === 0) {
+      emptyEl.style.display = '';
+      return;
+    }
+
+    /**
+     * Writes one lamp's selection back. The config is re-read every time
+     * rather than held in a closure: the standard schema form is on the same
+     * page and edits the same object, so a stale copy would silently undo
+     * whatever was typed into it. Only updatePluginConfig is called - that
+     * stages the change in memory, and the page's own Save button is what
+     * writes config.json, so nothing is persisted behind the user's back.
+     */
+    async function stage(deviceId, names) {
+      const current = await homebridge.getPluginConfig();
+      const entry = ((current[0] || {}).devices || []).find((d) => d.deviceId === deviceId);
+      if (!entry) {
+        return;
+      }
+      if (names.length === 0) {
+        delete entry.visibleEffects;
+      } else {
+        entry.visibleEffects = names;
+      }
+      await homebridge.updatePluginConfig(current);
+    }
+
+    for (const row of rows) {
+      const { effects, selected } = row;
+
+      const card = document.createElement('div');
+      card.className = 'gv-device';
+      card.innerHTML =
+        '<div class="gv-device-head">' +
+          '<h5></h5>' +
+          '<div class="gv-actions">' +
+            '<button type="button" class="btn btn-elegant btn-sm" data-act="all">Select all</button>' +
+            '<button type="button" class="btn btn-elegant btn-sm" data-act="none">Show all</button>' +
+          '</div>' +
+          '<span class="gv-count"></span>' +
+        '</div>' +
+        '<div class="gv-list"></div>';
+      card.querySelector('h5').textContent = row.name;
+
+      const listEl = card.querySelector('.gv-list');
+      const countEl = card.querySelector('.gv-count');
+      const boxes = new Map();
+
+      const refresh = () => {
+        const n = selected.size;
+        const atCap = n >= MAX_SELECTABLE;
+        countEl.textContent = n === 0
+          ? 'showing all ' + effects.length
+          : n + ' of ' + MAX_SELECTABLE + ' selected';
+        countEl.classList.toggle('gv-full', atCap);
+        for (const [name, box] of boxes) {
+          // The cap is enforced by making the unchecked ones unclickable once
+          // it is reached, so an over-long list can never be saved from here.
+          // The plugin truncates as well, so a hand-edited config.json is
+          // just as safe.
+          const blocked = atCap && !selected.has(name);
+          box.disabled = blocked;
+          box.parentElement.classList.toggle('gv-disabled', blocked);
+        }
+      };
+
+      const commit = async () => {
+        refresh();
+        try {
+          await stage(row.deviceId, effects.filter((e) => selected.has(e)));
+        } catch (err) {
+          homebridge.toast.error(err.message || String(err), 'Could not update the configuration');
+        }
+      };
+
+      for (const name of effects) {
+        const label = document.createElement('label');
+        label.className = 'gv-item';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = selected.has(name);
+        const text = document.createElement('span');
+        text.textContent = name;
+        label.append(box, text);
+        listEl.append(label);
+        boxes.set(name, box);
+        box.addEventListener('change', () => {
+          if (box.checked) {
+            selected.add(name);
+          } else {
+            selected.delete(name);
+          }
+          commit();
+        });
+      }
+
+      card.querySelector('[data-act="all"]').addEventListener('click', () => {
+        selected.clear();
+        // A lamp with fewer effects than the cap is already showing all of
+        // them by default, so "select all" is stored as the default rather
+        // than as a list that would go stale the moment Govee adds one.
+        if (effects.length > MAX_SELECTABLE) {
+          for (const name of effects.slice(0, MAX_SELECTABLE)) {
+            selected.add(name);
+          }
+        }
+        for (const [name, box] of boxes) {
+          box.checked = selected.has(name);
+        }
+        commit();
+      });
+
+      card.querySelector('[data-act="none"]').addEventListener('click', () => {
+        selected.clear();
+        for (const box of boxes.values()) {
+          box.checked = false;
+        }
+        commit();
+      });
+
+      refresh();
+      devicesEl.append(card);
+    }
+  })();
+</script>

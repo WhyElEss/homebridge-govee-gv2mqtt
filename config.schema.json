@@ -158,6 +158,17 @@
               "default": 100,
               "minimum": 0,
               "maximum": 100
+            },
+            "visibleEffects": {
+              "title": "Visible Effects",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Which of this device's effects appear on its Effects accessory. Managed on the plugin's own settings page; empty means all of them (capped at 97).",
+              "condition": {
+                "functionBody": "return false;"
+              }
             }
           }
         }
@@ -196,5 +207,6 @@
         "devices[].alertBrightness"
       ]
     }
-  ]
+  ],
+  "customUi": true
 }

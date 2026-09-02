@@ -564,3 +564,27 @@ test('a gappy restored catalog still hands out unused identifiers', async (t) =>
   assert.strictEqual(fresh, 8, `expected one past the highest in use, got ${fresh}`);
   assert.strictEqual(device.nameForIdentifier(7), 'Survivor', 'the survivor keeps its number');
 });
+
+/**
+ * Per-device effect selection. The filter is applied to the *services*, never
+ * to the catalog: identifiers stay assigned across the full list so that
+ * hiding an effect and showing it again later gives it back the same number.
+ */
+test('hiding effects does not disturb their identifiers', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  announceEffects(bridge, ['Night', 'Sunrise', 'Aurora']);
+  const before = device.effectCatalog().identifiers;
+
+  // Whatever the accessory chooses to show, the catalog is untouched - the
+  // accessory filters names when it builds services, and asks the device for
+  // an identifier per name, which never reassigns.
+  const shown = ['Normal Light', 'Aurora'];
+  const ids = shown.map((n) => device.identifierForName(n));
+
+  assert.deepStrictEqual(ids, [before['Normal Light'], before.Aurora], 'shown effects keep their numbers');
+  assert.deepStrictEqual(device.effectCatalog().identifiers, before, 'and hiding assigns nothing new');
+  assert.strictEqual(device.nameForIdentifier(before.Sunrise), 'Sunrise', 'a hidden effect keeps its slot');
+});

@@ -417,6 +417,33 @@ inside the plugin the moment the switch is toggled.
   is exactly what happened — the guard checked only the tracked mode, which
   the optimistic cache window (longer than the 5s delay) held at `effect`
   even after the "off" report had landed.
+- **Choosing which effects appear** (plugin settings page): Govee adds
+  scenes over time and a lamp can report far more than HomeKit will hold —
+  the Table Lamp here reports 107 against a limit of 98 inputs. The
+  plugin's own settings page lists every effect gv2mqtt has discovered
+  **for that specific lamp** and lets you tick the ones you want; anything
+  unticked simply isn't built as an input. Ticking none means "show them
+  all", which is the default and what every install had before this
+  existed.
+
+  The list has to be per-device and is only known at runtime, which
+  `config.schema.json` cannot express — it is static and shared by every
+  entry in the `devices` array — so this is a
+  [custom UI](https://github.com/homebridge/plugin-ui-utils). It reads the
+  catalog the plugin already caches in the accessory context (below), so
+  it needs no broker credentials and answers instantly; a lamp only appears
+  once the plugin has run and discovered its effects.
+
+  The cap is **97**, not 98: one input slot always goes to the synthetic
+  "Normal Light", which is how you leave effect mode and so can never be
+  hidden. The page stops you selecting more, and the plugin truncates
+  independently, so a hand-edited `config.json` can't overrun the limit
+  either. Hiding an effect does **not** renumber anything — identifiers
+  stay assigned across the full catalog, so re-enabling one later gives it
+  back the same input identifier and Home's own cache stays in step.
+  Changing the selection does rebuild the accessory's inputs once, which is
+  a genuine configuration change; it happens when you edit the list, not on
+  every restart.
 - **Cached effect catalog**: gv2mqtt doesn't retain its discovery topic, so
   a device's real effect list only arrives ~17s into a run. Building the
   Effects accessory from the fallback list and rebuilding it when the real
