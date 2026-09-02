@@ -1,164 +1,265 @@
 <style>
-  .gv-intro { margin-bottom: 1rem; }
-  .gv-device { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: .75rem; }
-  .gv-device > summary {
-    display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; cursor: pointer;
-    padding: .6rem .85rem; list-style: revert;
+  .gv-card { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: .8rem; }
+  .gv-card > summary {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    cursor: pointer; padding: .6rem .85rem;
   }
-  .gv-device[open] > summary { border-bottom: 1px solid rgba(128,128,128,.25); }
-  .gv-name { font-weight: 600; }
-  .gv-count { font-variant-numeric: tabular-nums; margin-left: auto; font-size: .85rem; opacity: .8; }
-  .gv-count.gv-warn { color: #d9534f; opacity: 1; font-weight: 600; }
-  .gv-body { padding: .6rem .85rem .8rem; }
-  .gv-actions { display: flex; gap: .4rem; margin-bottom: .5rem; }
+  .gv-card[open] > summary { border-bottom: 1px solid rgba(128,128,128,.25); }
+  .gv-title { font-weight: 600; }
+  .gv-sub { font-size: .82rem; opacity: .7; }
+  .gv-badge { margin-left: auto; font-size: .8rem; opacity: .8; font-variant-numeric: tabular-nums; }
+  .gv-badge.gv-warn { color: #d9534f; opacity: 1; font-weight: 600; }
+  .gv-badge.gv-off { color: #d9534f; opacity: .9; }
+  .gv-body { padding: .7rem .85rem .85rem; }
+  .gv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: .5rem .9rem; }
+  .gv-f { display: flex; flex-direction: column; gap: .15rem; }
+  .gv-f > label { font-size: .82rem; opacity: .85; }
+  .gv-f input[type=text], .gv-f input[type=number], .gv-f input[type=password] {
+    width: 100%; padding: .25rem .45rem; font-size: .87rem;
+    border: 1px solid rgba(128,128,128,.45); border-radius: .25rem;
+    background: transparent; color: inherit;
+  }
+  .gv-f .gv-hint { font-size: .75rem; opacity: .6; }
+  .gv-check { display: flex; align-items: center; gap: .45rem; font-size: .87rem; padding: .3rem 0; }
+  .gv-check input { margin: 0; flex: none; }
+  .gv-section { margin-top: .9rem; }
+  .gv-section > h6 {
+    font-size: .78rem; text-transform: uppercase; letter-spacing: .04em;
+    opacity: .6; margin: 0 0 .4rem; font-weight: 600;
+  }
+  .gv-actions { display: flex; gap: .4rem; flex-wrap: wrap; margin-bottom: .5rem; }
   .gv-actions button { font-size: .78rem; padding: .12rem .55rem; }
   .gv-dropped { font-size: .82rem; color: #d9534f; margin: 0 0 .5rem; }
-  .gv-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .1rem .75rem; }
-  .gv-item { display: flex; align-items: center; gap: .45rem; padding: .12rem 0; font-size: .87rem; }
-  .gv-item input { margin: 0; flex: none; }
-  .gv-item.gv-disabled { opacity: .45; }
+  .gv-effects { display: grid; grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr)); gap: .05rem .75rem; }
+  .gv-effects .gv-check.gv-disabled { opacity: .45; }
+  .gv-danger { margin-top: .9rem; }
+  .gv-note { font-size: .82rem; opacity: .75; }
   .gv-empty { padding: .85rem; font-size: .88rem; }
-  .gv-note { font-size: .82rem; opacity: .75; margin-top: .35rem; }
 </style>
 
-<div class="gv-intro">
-  <p class="mb-1">
-    Choose which of each lamp’s effects appear as inputs on its <strong>Effects</strong> accessory
-    in the Home app. The ticks show what is in HomeKit <em>right now</em>.
-  </p>
-  <p class="gv-note mb-0" id="gv-cap-note"></p>
-</div>
-
-<div id="gv-devices"></div>
-
-<div class="gv-empty" id="gv-empty" style="display:none">
-  No effect lists cached yet. Homebridge needs to run this plugin once with your lamps reachable —
-  gv2mqtt publishes each device’s real effect list a few seconds after startup, and the plugin
-  remembers it. Restart Homebridge, then reopen this page.
+<div id="gv-root">
+  <p class="gv-note" id="gv-lead"></p>
+  <div id="gv-platform"></div>
+  <h6 style="font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;opacity:.6;margin:.9rem 0 .4rem;font-weight:600">Lamps</h6>
+  <div id="gv-devices"></div>
+  <div class="gv-empty" id="gv-nodevices" style="display:none">
+    No lamps configured yet. Turn on <strong>Auto-discover devices</strong> above and restart Homebridge,
+    or add one by hand.
+  </div>
+  <button type="button" class="btn btn-elegant btn-sm" id="gv-add">Add a lamp by hand</button>
 </div>
 
 <script>
-  (async () => {
+  (() => {
     // Mirrors MAX_SELECTABLE_EFFECTS in src/effects-accessory.ts: HomeKit caps
     // an accessory at 100 services, two go to the accessory information and
     // the television itself, and one input is always "Normal Light".
     const MAX_SELECTABLE = 97;
 
-    // With customUi the standard settings form is no longer rendered on its
-    // own, so it has to be asked for - without this every other setting
-    // (broker URL, the device list, Adaptive Lighting) would be unreachable.
-    homebridge.showSchemaForm();
+    // The whole page is hand-built rather than schema-driven. createForm()
+    // renders only one form at a time and chooses its own place on the page,
+    // and showSchemaForm() can only show the generated form whole - neither
+    // can put a lamp's effect list inside that lamp's own card, which is the
+    // point of this page.
+    const PLATFORM_FIELDS = [
+      { key: 'name', label: 'Platform name', type: 'text', placeholder: 'Govee (gv2mqtt)' },
+      { key: 'mqttUrl', label: 'MQTT broker URL', type: 'text', placeholder: 'mqtt://mosquitto:1883' },
+      { key: 'mqttUsername', label: 'MQTT username', type: 'text' },
+      { key: 'mqttPassword', label: 'MQTT password', type: 'password' },
+      { key: 'topicPrefix', label: 'Topic prefix', type: 'text', placeholder: 'gv2mqtt/light',
+        hint: 'Matches gv2mqtt’s layout: /state and /command' },
+      { key: 'haDiscoveryPrefix', label: 'Discovery prefix', type: 'text', placeholder: 'homeassistant' },
+      { key: 'haStatusTopic', label: 'Status (birth) topic', type: 'text', placeholder: '<discovery prefix>/status' },
+      { key: 'optimisticCacheMs', label: 'Echo window (ms)', type: 'number', placeholder: '10000',
+        hint: 'How long a property we just commanded ignores the device’s reports' },
+      { key: 'periodicRefreshIntervalMs', label: 'Periodic refresh (ms)', type: 'number', placeholder: '0 (off)' },
+      { key: 'refreshStateOnConnect', label: 'Ask gv2mqtt to republish on connect', type: 'boolean', fallback: true },
+      { key: 'autoDiscover', label: 'Auto-discover devices', type: 'boolean', fallback: false },
+    ];
 
-    const devicesEl = document.getElementById('gv-devices');
-    const emptyEl = document.getElementById('gv-empty');
-    document.getElementById('gv-cap-note').textContent =
-      'HomeKit fits at most ' + MAX_SELECTABLE + ' effects per lamp. Changes take effect when you press Save.';
+    const DEVICE_FIELDS = {
+      basics: [
+        { key: 'name', label: 'Name', type: 'text' },
+        { key: 'deviceId', label: 'Govee device ID', type: 'text' },
+        { key: 'enabled', label: 'Expose this lamp to HomeKit', type: 'boolean', fallback: true },
+        { key: 'adaptiveLighting', label: 'Adaptive Lighting', type: 'boolean', fallback: true },
+        { key: 'enableEffects', label: 'Effects accessory', type: 'boolean', fallback: true },
+      ],
+      colour: [
+        { key: 'minMireds', label: 'Coolest (mireds)', type: 'number', placeholder: '111' },
+        { key: 'maxMireds', label: 'Warmest (mireds)', type: 'number', placeholder: '500' },
+        { key: 'colorSaturationThreshold', label: 'White threshold', type: 'number', step: '0.01', placeholder: '0.75',
+          hint: 'Below this saturation the colour wheel sends a white instead' },
+      ],
+      alert: [
+        { key: 'enableAlert', label: 'Alert switch', type: 'boolean', fallback: false },
+        { key: 'alertHue', label: 'Alert hue', type: 'number', placeholder: '0' },
+        { key: 'alertSaturation', label: 'Alert saturation', type: 'number', placeholder: '100' },
+        { key: 'alertBrightness', label: 'Alert brightness', type: 'number', placeholder: '100' },
+      ],
+      startup: [
+        { key: 'turnOffOnStartup', label: 'Force off shortly after Homebridge starts', type: 'boolean', fallback: false },
+        { key: 'turnOffOnStartupDelayMs', label: 'Delay before that (ms)', type: 'number', placeholder: '10000' },
+      ],
+    };
 
-    homebridge.showSpinner();
-    let catalogs;
     let config;
-    try {
-      catalogs = await homebridge.request('/effects');
-      config = await homebridge.getPluginConfig();
-    } catch (err) {
-      homebridge.hideSpinner();
-      homebridge.toast.error(err.message || String(err), 'Could not load effects');
-      return;
-    }
-    homebridge.hideSpinner();
-
-    const byId = new Map((catalogs.devices || []).map((d) => [d.deviceId, d.effects]));
-    const configured = ((config[0] || {}).devices) || [];
-
-    const rows = configured
-      .map((device) => ({
-        deviceId: device.deviceId,
-        name: device.name || device.deviceId,
-        effects: byId.get(device.deviceId),
-        configured: Array.isArray(device.visibleEffects) ? device.visibleEffects : null,
-      }))
-      .filter((row) => Array.isArray(row.effects) && row.effects.length > 0);
-
-    if (rows.length === 0) {
-      emptyEl.style.display = '';
-      return;
-    }
+    let platform;
+    let catalogs = new Map();
 
     /**
-     * Writes one lamp's selection back. The config is re-read every time
-     * rather than held in a closure: the standard schema form is on the same
-     * page and edits the same object, so a stale copy would silently undo
-     * whatever was typed into it. Only updatePluginConfig is called - that
-     * stages the change in memory, and the page's own Save button is what
-     * writes config.json, so nothing is persisted behind the user's back.
+     * Stages the whole config in memory. Nothing is written to config.json
+     * here - the page's own Save button does that - and the objects are
+     * mutated in place rather than rebuilt, so any key this page does not
+     * render survives untouched.
      */
-    async function stage(deviceId, names) {
-      const current = await homebridge.getPluginConfig();
-      const entry = ((current[0] || {}).devices || []).find((d) => d.deviceId === deviceId);
-      if (!entry) {
-        return;
+    const stage = () => homebridge.updatePluginConfig(config);
+
+    function field(target, desc) {
+      const wrap = document.createElement('div');
+      if (desc.type === 'boolean') {
+        wrap.className = 'gv-check';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = target[desc.key] === undefined ? !!desc.fallback : !!target[desc.key];
+        const label = document.createElement('label');
+        label.textContent = desc.label;
+        label.style.margin = '0';
+        wrap.append(box, label);
+        const apply = () => {
+          // Anything equal to the plugin's own default is left out of the
+          // file, so config.json stays readable and defaults keep tracking
+          // the plugin rather than being frozen at install time.
+          if (box.checked === !!desc.fallback) {
+            delete target[desc.key];
+          } else {
+            target[desc.key] = box.checked;
+          }
+          stage();
+          if (desc.onChange) {
+            desc.onChange(box.checked);
+          }
+        };
+        box.addEventListener('change', apply);
+        label.addEventListener('click', () => { box.checked = !box.checked; apply(); });
+        return wrap;
       }
-      if (names === null) {
-        delete entry.visibleEffects;
-      } else {
-        entry.visibleEffects = names;
+
+      wrap.className = 'gv-f';
+      const label = document.createElement('label');
+      label.textContent = desc.label;
+      const input = document.createElement('input');
+      input.type = desc.type === 'number' ? 'number' : desc.type;
+      if (desc.step) {
+        input.step = desc.step;
       }
-      await homebridge.updatePluginConfig(current);
+      if (desc.placeholder) {
+        input.placeholder = desc.placeholder;
+      }
+      const current = target[desc.key];
+      input.value = current === undefined || current === null ? '' : String(current);
+      wrap.append(label, input);
+      if (desc.hint) {
+        const hint = document.createElement('span');
+        hint.className = 'gv-hint';
+        hint.textContent = desc.hint;
+        wrap.append(hint);
+      }
+      input.addEventListener('input', () => {
+        const raw = input.value.trim();
+        if (raw === '') {
+          delete target[desc.key];
+        } else if (desc.type === 'number') {
+          const n = Number(raw);
+          if (Number.isNaN(n)) {
+            return;
+          }
+          target[desc.key] = n;
+        } else {
+          target[desc.key] = raw;
+        }
+        stage();
+        if (desc.onChange) {
+          desc.onChange(target[desc.key]);
+        }
+      });
+      return wrap;
     }
 
-    for (const row of rows) {
-      const { effects } = row;
-      const overflows = effects.length > MAX_SELECTABLE;
+    function group(title, target, descs) {
+      const section = document.createElement('div');
+      section.className = 'gv-section';
+      const heading = document.createElement('h6');
+      heading.textContent = title;
+      const grid = document.createElement('div');
+      grid.className = 'gv-grid';
+      for (const desc of descs) {
+        grid.append(field(target, desc));
+      }
+      section.append(heading, grid);
+      return section;
+    }
 
-      // What is actually in HomeKit. With no explicit selection the plugin
-      // takes the list in order and truncates, so on a lamp with more effects
-      // than will fit the default is NOT "all of them" - the tail is silently
-      // dropped. Ticking the real set is the whole point: otherwise the page
-      // claims a state the accessory cannot be in.
-      let explicit = row.configured && row.configured.length > 0;
+    function effectsBlock(device) {
+      const effects = catalogs.get(device.deviceId);
+      const section = document.createElement('div');
+      section.className = 'gv-section';
+      const heading = document.createElement('h6');
+      heading.textContent = 'Effects shown in HomeKit';
+      section.append(heading);
+
+      if (!Array.isArray(effects) || effects.length === 0) {
+        const note = document.createElement('p');
+        note.className = 'gv-note';
+        note.style.margin = '0';
+        note.textContent =
+          'No effect list cached for this lamp yet. gv2mqtt publishes it a few seconds after '
+          + 'Homebridge starts; restart and reopen this page.';
+        section.append(note);
+        return { section, refresh: () => {} };
+      }
+
+      const overflows = effects.length > MAX_SELECTABLE;
+      // What is actually in HomeKit. With no selection the plugin takes the
+      // list in order and truncates, so on a lamp with more effects than fit
+      // the default is NOT "all of them" - the tail is silently dropped, and
+      // showing it as selected would claim a state the accessory cannot be in.
+      let explicit = Array.isArray(device.visibleEffects);
       const selected = new Set(
         explicit
-          ? row.configured.filter((n) => effects.includes(n))
+          ? device.visibleEffects.filter((n) => effects.includes(n))
           : effects.slice(0, MAX_SELECTABLE),
       );
 
-      const card = document.createElement('details');
-      card.className = 'gv-device';
-      card.open = rows.length === 1;
-      card.innerHTML =
-        '<summary><span class="gv-name"></span><span class="gv-count"></span></summary>' +
-        '<div class="gv-body">' +
-          '<div class="gv-actions">' +
-            '<button type="button" class="btn btn-elegant btn-sm" data-act="all">Select all</button>' +
-            '<button type="button" class="btn btn-elegant btn-sm" data-act="default">Reset to default</button>' +
-          '</div>' +
-          '<p class="gv-dropped" style="display:none"></p>' +
-          '<div class="gv-list"></div>' +
-        '</div>';
-      card.querySelector('.gv-name').textContent = row.name;
+      const actions = document.createElement('div');
+      actions.className = 'gv-actions';
+      actions.innerHTML =
+        '<button type="button" class="btn btn-elegant btn-sm" data-act="all">Select all</button>' +
+        '<button type="button" class="btn btn-elegant btn-sm" data-act="none">Deselect all</button>' +
+        '<button type="button" class="btn btn-elegant btn-sm" data-act="default">Reset to default</button>';
+      const dropped = document.createElement('p');
+      dropped.className = 'gv-dropped';
+      dropped.style.display = 'none';
+      const list = document.createElement('div');
+      list.className = 'gv-effects';
+      section.append(actions, dropped, list);
 
-      const listEl = card.querySelector('.gv-list');
-      const countEl = card.querySelector('.gv-count');
-      const droppedEl = card.querySelector('.gv-dropped');
       const boxes = new Map();
+      const badge = document.createElement('span');
 
       const refresh = () => {
         const n = selected.size;
         const atCap = n >= MAX_SELECTABLE;
-        countEl.textContent = explicit
+        badge.textContent = explicit
           ? n + ' of ' + effects.length + ' chosen'
-          : n + ' of ' + effects.length + ' \u2014 default';
-        countEl.classList.toggle('gv-warn', atCap || (!explicit && overflows));
-
-        // Only worth saying while on the default, where the drop is silent
-        // and not the user's doing.
-        const dropped = !explicit && overflows ? effects.length - MAX_SELECTABLE : 0;
-        droppedEl.style.display = dropped ? '' : 'none';
-        droppedEl.textContent = dropped
-          ? dropped + ' effect(s) at the end of the list do not fit and are not in HomeKit. '
+          : n + ' of ' + effects.length + ' — default';
+        badge.className = 'gv-badge' + (atCap || (!explicit && overflows) ? ' gv-warn' : '');
+        const missing = !explicit && overflows ? effects.length - MAX_SELECTABLE : 0;
+        dropped.style.display = missing ? '' : 'none';
+        dropped.textContent = missing
+          ? missing + ' effect(s) at the end of the list do not fit and are not in HomeKit. '
             + 'Tick the ones you want instead.'
           : '';
-
         for (const [name, box] of boxes) {
           const blocked = atCap && !selected.has(name);
           box.disabled = blocked;
@@ -166,27 +267,28 @@
         }
       };
 
-      const commit = async (names) => {
-        refresh();
-        try {
-          await stage(row.deviceId, names);
-        } catch (err) {
-          homebridge.toast.error(err.message || String(err), 'Could not update the configuration');
+      const commit = () => {
+        if (explicit) {
+          // An empty array is meaningful and is written as such: it means
+          // "none of them", which is why Deselect all survives a save.
+          device.visibleEffects = effects.filter((e) => selected.has(e));
+        } else {
+          delete device.visibleEffects;
         }
+        refresh();
+        stage();
       };
 
-      const chosen = () => effects.filter((e) => selected.has(e));
-
       for (const name of effects) {
-        const label = document.createElement('label');
-        label.className = 'gv-item';
+        const row = document.createElement('label');
+        row.className = 'gv-check';
         const box = document.createElement('input');
         box.type = 'checkbox';
         box.checked = selected.has(name);
         const text = document.createElement('span');
         text.textContent = name;
-        label.append(box, text);
-        listEl.append(label);
+        row.append(box, text);
+        list.append(row);
         boxes.set(name, box);
         box.addEventListener('change', () => {
           if (box.checked) {
@@ -194,45 +296,158 @@
           } else {
             selected.delete(name);
           }
-          // Any tick is a deliberate choice, so it stops being the default.
-          explicit = true;
-          commit(chosen());
+          explicit = true; // any tick is a deliberate choice
+          commit();
         });
       }
 
-      card.querySelector('[data-act="all"]').addEventListener('click', () => {
-        // Every effect that fits, in list order. Stored explicitly even when
-        // the whole catalog fits: the button says "select all", so it has to
-        // tick all of them, and an earlier attempt to be clever about this -
-        // treating it as the default whenever the list was under the cap -
-        // simply made the button do nothing on a lamp with 47 effects.
+      const setAll = (names) => {
         selected.clear();
-        for (const name of effects.slice(0, MAX_SELECTABLE)) {
+        for (const name of names) {
           selected.add(name);
         }
-        explicit = true;
         for (const [name, box] of boxes) {
           box.checked = selected.has(name);
         }
-        commit(chosen());
-      });
+      };
 
-      card.querySelector('[data-act="default"]').addEventListener('click', () => {
-        // Back to no setting at all: the plugin takes the list in order, and
-        // effects Govee adds later appear on their own.
-        selected.clear();
-        for (const name of effects.slice(0, MAX_SELECTABLE)) {
-          selected.add(name);
-        }
+      actions.querySelector('[data-act="all"]').addEventListener('click', () => {
+        explicit = true;
+        setAll(effects.slice(0, MAX_SELECTABLE));
+        commit();
+      });
+      actions.querySelector('[data-act="none"]').addEventListener('click', () => {
+        explicit = true;
+        setAll([]);
+        commit();
+      });
+      actions.querySelector('[data-act="default"]').addEventListener('click', () => {
         explicit = false;
-        for (const [name, box] of boxes) {
-          box.checked = selected.has(name);
-        }
-        commit(null);
+        setAll(effects.slice(0, MAX_SELECTABLE));
+        commit();
       });
 
       refresh();
-      devicesEl.append(card);
+      return { section, badge, refresh };
     }
+
+    function deviceCard(device) {
+      const card = document.createElement('details');
+      card.className = 'gv-card';
+      const summary = document.createElement('summary');
+      const title = document.createElement('span');
+      title.className = 'gv-title';
+      const sub = document.createElement('span');
+      sub.className = 'gv-sub';
+      summary.append(title, sub);
+      card.append(summary);
+
+      const body = document.createElement('div');
+      body.className = 'gv-body';
+      card.append(body);
+
+      const retitle = () => {
+        title.textContent = device.name || '(unnamed lamp)';
+        sub.textContent = device.deviceId || 'no device ID';
+        summary.classList.toggle('gv-off', device.enabled === false);
+      };
+
+      const basics = DEVICE_FIELDS.basics.map((d) =>
+        d.key === 'name' || d.key === 'deviceId' ? { ...d, onChange: retitle } : d);
+      body.append(group('Basics', device, basics));
+      body.append(group('Colour', device, DEVICE_FIELDS.colour));
+      body.append(group('Alert switch', device, DEVICE_FIELDS.alert));
+      body.append(group('Startup', device, DEVICE_FIELDS.startup));
+
+      const effects = effectsBlock(device);
+      body.append(effects.section);
+      if (effects.badge) {
+        summary.append(effects.badge);
+      }
+
+      const danger = document.createElement('div');
+      danger.className = 'gv-danger';
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'btn btn-danger btn-sm';
+      remove.textContent = 'Remove this lamp';
+      remove.addEventListener('click', () => {
+        const label = device.name || device.deviceId || 'this lamp';
+        if (!window.confirm('Remove ' + label + ' from the configuration?')) {
+          return;
+        }
+        const at = platform.devices.indexOf(device);
+        if (at >= 0) {
+          platform.devices.splice(at, 1);
+        }
+        card.remove();
+        document.getElementById('gv-nodevices').style.display =
+          platform.devices.length === 0 ? '' : 'none';
+        stage();
+        homebridge.toast.info(
+          'Removed. Press Save to apply — with auto-discovery on, a lamp Govee still reports will come back.',
+          label,
+        );
+      });
+      danger.append(remove);
+      body.append(danger);
+
+      retitle();
+      return card;
+    }
+
+    (async () => {
+      homebridge.showSpinner();
+      let discovered;
+      try {
+        config = await homebridge.getPluginConfig();
+        discovered = await homebridge.request('/effects');
+      } catch (err) {
+        homebridge.hideSpinner();
+        homebridge.toast.error(err.message || String(err), 'Could not load the configuration');
+        return;
+      }
+      homebridge.hideSpinner();
+
+      if (!config.length) {
+        config.push({ platform: 'GoveeGv2Mqtt', name: 'Govee (gv2mqtt)' });
+      }
+      platform = config[0];
+      if (!Array.isArray(platform.devices)) {
+        platform.devices = [];
+      }
+      catalogs = new Map((discovered.devices || []).map((d) => [d.deviceId, d.effects]));
+
+      document.getElementById('gv-lead').textContent =
+        'Every lamp is a card with all of its settings, including which of its effects reach HomeKit. '
+        + 'Changes take effect when you press Save.';
+
+      const platformCard = document.createElement('details');
+      platformCard.className = 'gv-card';
+      platformCard.open = platform.devices.length === 0;
+      platformCard.innerHTML = '<summary><span class="gv-title">Broker and platform</span></summary>';
+      const platformBody = document.createElement('div');
+      platformBody.className = 'gv-body';
+      platformBody.append(group('Connection', platform, PLATFORM_FIELDS));
+      platformCard.append(platformBody);
+      document.getElementById('gv-platform').append(platformCard);
+
+      const devicesEl = document.getElementById('gv-devices');
+      for (const device of platform.devices) {
+        devicesEl.append(deviceCard(device));
+      }
+      document.getElementById('gv-nodevices').style.display =
+        platform.devices.length === 0 ? '' : 'none';
+
+      document.getElementById('gv-add').addEventListener('click', () => {
+        const device = { name: 'New lamp', deviceId: '' };
+        platform.devices.push(device);
+        const card = deviceCard(device);
+        card.open = true;
+        devicesEl.append(card);
+        document.getElementById('gv-nodevices').style.display = 'none';
+        stage();
+      });
+    })();
   })();
 </script>

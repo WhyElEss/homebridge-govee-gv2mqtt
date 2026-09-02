@@ -611,3 +611,20 @@ test('an outdated cached context is rewritten even when the list matches', async
   assert.ok(namesMatch, 'the lists are identical, which is what made this bite');
   assert.notStrictEqual(stale.deviceId, current.deviceId, 'yet the context is out of date');
 });
+
+/**
+ * Unset and empty have to mean different things, or there is no way to say
+ * "none" and the settings page's Deselect-all cannot survive a save.
+ */
+test('an unset effect selection differs from an empty one', () => {
+  const { resolveDeviceConfig } = require('../dist/config');
+  const unset = resolveDeviceConfig({ name: 'l', deviceId: 'x' }, 'gv2mqtt/light', 'homeassistant');
+  const none = resolveDeviceConfig(
+    { name: 'l', deviceId: 'x', visibleEffects: [] }, 'gv2mqtt/light', 'homeassistant');
+  const some = resolveDeviceConfig(
+    { name: 'l', deviceId: 'x', visibleEffects: ['Night'] }, 'gv2mqtt/light', 'homeassistant');
+
+  assert.strictEqual(unset.visibleEffects, null, 'unset stays null so it can mean "all"');
+  assert.deepStrictEqual(none.visibleEffects, [], 'an explicit empty list is preserved, not treated as unset');
+  assert.deepStrictEqual(some.visibleEffects, ['Night']);
+});

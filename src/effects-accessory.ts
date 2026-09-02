@@ -176,10 +176,11 @@ export class EffectsAccessory {
   }
 
   /**
-   * Applies the user's per-device selection. An empty selection means "all
-   * of them" - the default, and what every install had before this existed.
-   * "Normal Light" is index 0 and always survives: it is not a Govee effect
-   * but the way out of effect mode.
+   * Applies the user's per-device selection. Unset means "all of them" - the
+   * default, and what every install had before this existed - while an empty
+   * array means the user deliberately chose none. "Normal Light" is index 0
+   * and survives either way: it is not a Govee effect but the way out of
+   * effect mode.
    *
    * Note this filters the *services*, never the catalog. Identifiers stay
    * assigned across the full list, so hiding an effect and showing it again
@@ -188,10 +189,12 @@ export class EffectsAccessory {
    */
   private selectVisible(all: string[]): string[] {
     const wanted = this.device.config.visibleEffects;
-    if (!wanted || wanted.length === 0) {
-      return all;
+    if (wanted === null) {
+      return all; // unset: all of them, and anything Govee adds later
     }
     const keep = new Set(wanted);
+    // An empty selection leaves just index 0, "Normal Light" - not a Govee
+    // effect but the way out of effect mode, so it is never removed.
     return all.filter((name, index) => index === 0 || keep.has(name));
   }
 
