@@ -422,17 +422,31 @@ inside the plugin the moment the switch is toggled.
   the Table Lamp here reports 107 against a limit of 98 inputs. The
   plugin's own settings page lists every effect gv2mqtt has discovered
   **for that specific lamp** and lets you tick the ones you want; anything
-  unticked simply isn't built as an input. Ticking none means "show them
-  all", which is the default and what every install had before this
-  existed.
+  unticked simply isn't built as an input. Leaving a lamp alone means
+  "show them all", which is the default and what every install had before
+  this existed; deliberately unticking everything is a different thing and
+  leaves the accessory with only "Normal Light" (an unset `visibleEffects`
+  and an empty one mean different things, on purpose — without that there
+  is no way to express "none").
 
   The list has to be per-device and is only known at runtime, which
   `config.schema.json` cannot express — it is static and shared by every
-  entry in the `devices` array — so this is a
-  [custom UI](https://github.com/homebridge/plugin-ui-utils). It reads the
-  catalog the plugin already caches in the accessory context (below), so
-  it needs no broker credentials and answers instantly; a lamp only appears
-  once the plugin has run and discovered its effects.
+  entry in the `devices` array — so the whole settings page is a
+  [custom UI](https://github.com/homebridge/plugin-ui-utils), with each
+  lamp as one card holding all of its settings and its effect list
+  together. That layout is also why the page is hand-built rather
+  than schema-driven: neither way of rendering a generated form can put a
+  lamp’s list inside that lamp’s own block, since `showSchemaForm()` only
+  shows the form whole and `createForm()` renders one form at a time in a
+  place it chooses itself. The page reads the catalog the plugin already
+  caches in the accessory context (below), so it needs no broker
+  credentials and answers instantly; a lamp’s effect list appears once the
+  plugin has run and discovered it.
+
+  What is ticked always reflects what is in HomeKit **right now**. With no
+  selection on a lamp whose catalog overruns the limit, that is the first
+  97 in list order — the rest are silently absent, and the page says how
+  many.
 
   The cap is **97**, not 98: one input slot always goes to the synthetic
   "Normal Light", which is how you leave effect mode and so can never be
