@@ -232,6 +232,21 @@ inside the plugin the moment the switch is toggled.
   "on" report lands — and, worse than the flicker, from leaving `isOn`
   cached false, where a tap on the seemingly-off tile took the full
   power-on path and cancelled the effect just selected.
+- **Coalesced slider writes**: Home streams the slider position as a burst
+  of characteristic writes while a finger is moving — one drag captured on
+  2026-09-02 produced 27 brightness writes in three seconds. Publishing
+  each one gives gv2mqtt 27 separate Govee API calls to make and 27 state
+  reports to send back; the lamp was still working through that queue
+  eight seconds after the drag began, visibly trailing the slider. Both
+  brightness and the color wheel are therefore coalesced (~100ms and 50ms
+  trailing windows): the cached value moves with every write, so the Home
+  app and `onGet` are correct immediately, but only the value the finger
+  settled on goes on the wire. Writes further apart than the window still
+  go out one by one, so a slow drag still tracks live. Whether a
+  brightness change is real enough to back out of a running effect is
+  judged against the value from *before* the burst, so a drag that ends
+  where it started — or Home resending the same value — doesn't cancel an
+  effect.
 - **White vs. color heuristic** (`colorSaturationThreshold`, default
   `0.75`): when Home's color wheel is used, the resulting color's
   saturation decides whether it's sent to the device as a

@@ -320,3 +320,93 @@ test('a white picked after a color on an off lamp wins', async (t) => {
   assert.ok(bridge.published.some((c) => typeof c.color_temp === 'number'));
   assert.strictEqual(device.getState().mode, 'adaptive');
 });
+
+/**
+ * The exact brightness burst captured on 2026-09-02 10:19:31-34 while the
+ * user dragged the slider: 26 writes, each of which the plugin published as
+ * its own command, each answered by its own state report. The lamp was still
+ * chasing that queue eight seconds after the drag began.
+ */
+const CAPTURED_DRAG = [
+  100, 100, 100, 100, 100, 100, 100, 100, 56, 1, 100, 99, 1, 100, 100, 74,
+  91, 100, 100, 100, 69, 4, 100, 74, 100, 100,
+];
+
+test('a slider drag is coalesced into one command', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setOn(true, 'lightbulb');
+  const before = bridge.published.length;
+
+  for (const value of CAPTURED_DRAG) {
+    device.setBrightness(value);
+  }
+  // The cache must track the finger even though the wire does not.
+  assert.strictEqual(device.getState().brightness, 100, 'the cache follows every write immediately');
+  assert.strictEqual(bridge.published.length, before, 'nothing is published mid-drag');
+
+  await settle(160);
+
+  const sent = bridge.published.slice(before);
+  assert.deepStrictEqual(sent, [{ state: 'ON', brightness: 100 }], `26 writes must collapse to one, got ${sent.length}`);
+});
+
+test('a slow drag still tracks live', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setOn(true, 'lightbulb');
+  const before = bridge.published.length;
+
+  device.setBrightness(40);
+  await settle(160);
+  device.setBrightness(80);
+  await settle(160);
+
+  assert.deepStrictEqual(bridge.published.slice(before), [
+    { state: 'ON', brightness: 40 },
+    { state: 'ON', brightness: 80 },
+  ], 'writes further apart than the coalescing window still go out one by one');
+});
+
+test('a drag that ends where it began does not cancel a running effect', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  const night = device.identifierForName('Night');
+  device.setEffectIndex(night);
+  const before = bridge.published.length;
+
+  // Dragged down and back up: the intermediate values are not a change.
+  device.setBrightness(40);
+  device.setBrightness(10);
+  device.setBrightness(100);
+  await settle(160);
+
+  assert.strictEqual(device.getState().mode, 'effect', 'the effect must survive a round-trip drag');
+  assert.strictEqual(device.getState().effectIndex, night);
+  assert.deepStrictEqual(bridge.published.slice(before), [], 'and nothing should have been sent');
+});
+
+test('a real brightness change still exits effect mode, once', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+
+  device.setEffectIndex(device.identifierForName('Night'));
+  const before = bridge.published.length;
+
+  device.setBrightness(80);
+  device.setBrightness(60);
+  device.setBrightness(42);
+  await settle(160);
+
+  assert.strictEqual(device.getState().mode, 'adaptive', 'a real change backs out of the effect');
+  const sent = bridge.published.slice(before);
+  assert.strictEqual(sent.length, 1, `expected one command, got ${sent.length}`);
+  assert.strictEqual(sent[0].brightness, 42, 'and it carries the value the finger settled on');
+});

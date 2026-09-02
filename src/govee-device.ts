@@ -134,6 +134,19 @@ const AL_ACTIVATION_WINDOW_MS = 5000;
  */
 const SCENE_BATCH_GRACE_MS = 2000;
 
+/**
+ * How long to sit on a brightness write before publishing it. Home streams
+ * the slider position as a burst of writes while a finger is moving: one
+ * drag captured on 2026-09-02 produced 27 of them inside three seconds, and
+ * every one was published as its own command, turned into its own Govee API
+ * call by gv2mqtt, and echoed back as its own state report - the lamp was
+ * still working through that queue eight seconds after the drag began,
+ * visibly trailing the slider. The color wheel already gets this treatment
+ * (see queueHueSat); at this scale it is invisible, and writes further apart
+ * than this still go out one by one, so a slow drag still tracks live.
+ */
+const BRIGHTNESS_COALESCE_MS = 100;
+
 const DEFAULT_STATE: GoveeDeviceState = {
   isOn: false,
   brightness: 100,
@@ -156,6 +169,16 @@ export class GoveeDevice extends EventEmitter {
   private lastLocalSetAt = 0;
   private pendingHueSat: { hue?: number; saturation?: number } | null = null;
   private hueSatFlushTimer?: NodeJS.Timeout;
+  private brightnessFlushTimer?: NodeJS.Timeout;
+  /**
+   * The brightness this device had when the current burst of slider writes
+   * started, or null when no burst is pending. What "the user really changed
+   * the brightness" is measured against at flush time - an individual write
+   * mid-drag says nothing, and a drag that ends where it began (Home resends
+   * the same value freely) must not count as a change and cancel a running
+   * effect.
+   */
+  private brightnessBeforeBurst: number | null = null;
   private effectReassertTimer?: NodeJS.Timeout;
   private alPublishTimer?: NodeJS.Timeout;
   private lastAlCommandAt = 0;
@@ -657,27 +680,55 @@ export class GoveeDevice extends EventEmitter {
 
   setBrightness(brightness: number): void {
     const rounded = Math.round(brightness);
-    const changed = rounded !== this.state.brightness;
     this.log.debug(
-      `[${this.config.name}] setBrightness(${rounded}) - was=${this.state.brightness}, changed=${changed}, ` +
+      `[${this.config.name}] setBrightness(${rounded}) - was=${this.state.brightness}, ` +
         `isOn=${this.state.isOn}, mode=${this.state.mode}`,
     );
     this.markLocalChange();
+    if (this.brightnessBeforeBurst === null) {
+      this.brightnessBeforeBurst = this.state.brightness;
+    }
+    // The cache moves immediately even though the command is deferred, so
+    // onGet and anything else reading state see the slider's real position
+    // at once; only what goes on the wire is coalesced.
     this.state.brightness = rounded;
+
     if (!this.state.isOn) {
+      // Nothing to send - the value is just remembered for the next power-on.
+      this.brightnessBeforeBurst = null;
       return;
     }
+
+    if (this.brightnessFlushTimer) {
+      clearTimeout(this.brightnessFlushTimer);
+    }
+    this.brightnessFlushTimer = setTimeout(() => this.flushBrightness(), BRIGHTNESS_COALESCE_MS);
+  }
+
+  private flushBrightness(): void {
+    this.brightnessFlushTimer = undefined;
+    const before = this.brightnessBeforeBurst;
+    this.brightnessBeforeBurst = null;
+
+    if (!this.state.isOn) {
+      // Switched off (physical button, HomeKit, an alert) while the burst
+      // was settling. Every command shape below carries state:"ON", so
+      // sending one now would light the lamp back up.
+      this.log.debug(`[${this.config.name}] Dropping deferred brightness - the light is off`);
+      return;
+    }
+
     if (this.state.mode === 'effect') {
-      if (!changed) {
+      if (before === this.state.brightness) {
         // HomeKit resends the last-known brightness right after turning a
         // light on (e.g. as part of the same automation transaction that
-        // also just selected an effect via the Effects accessory). Treat a
-        // no-op resend as just that, not as a user dragging the brightness
-        // slider to explicitly back out of the effect.
-        this.log.debug(`[${this.config.name}] setBrightness: no-op resend, staying in effect mode`);
+        // also just selected an effect via the Effects accessory), and a
+        // drag can end back where it started. Treat either as the no-op it
+        // is, not as the user explicitly backing out of the effect.
+        this.log.debug(`[${this.config.name}] flushBrightness: no-op resend, staying in effect mode`);
         return;
       }
-      this.log.debug(`[${this.config.name}] setBrightness: exiting effect mode (real brightness change)`);
+      this.log.debug(`[${this.config.name}] flushBrightness: exiting effect mode (real brightness change)`);
       this.resetToNormalLight();
       this.publishColorTemp(this.state.mireds, this.state.brightness);
     } else {
