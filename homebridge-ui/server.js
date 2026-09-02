@@ -3,7 +3,7 @@ const path = require('path');
 const { HomebridgePluginUiServer } = require('@homebridge/plugin-ui-utils');
 
 /**
- * Serves each configured lamp's real effect list to the settings page.
+ * Serves each configured device's real effect list to the settings page.
  *
  * The list is per-device and only known at runtime - gv2mqtt fetches it from
  * Govee's own API for that exact SKU, plus the account's DIY scenes - so it
