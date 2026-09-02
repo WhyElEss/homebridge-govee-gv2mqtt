@@ -222,11 +222,19 @@ export class EffectsAccessory {
     const catalog = { deviceId: this.device.config.deviceId, ...this.device.effectCatalog() };
     const cached = this.accessory.context as EffectsContext;
     if (
+      cached.deviceId === catalog.deviceId &&
       cached.effectNames?.length === catalog.effectNames.length &&
       cached.effectNames.every((n, i) => n === catalog.effectNames[i])
     ) {
       return;
     }
+    // Every field is compared, not just the list. A context written by an
+    // older version can hold the right effect names and still be missing
+    // something added since - deviceId, which the settings UI needs to tell
+    // whose catalog it is reading. Comparing only the names meant an
+    // unchanged list short-circuited the write and the new field was never
+    // filled in, leaving the settings page with nothing to show.
+
     this.accessory.context = catalog;
     this.platform.api.updatePlatformAccessories([this.accessory]);
     this.platform.log.debug(

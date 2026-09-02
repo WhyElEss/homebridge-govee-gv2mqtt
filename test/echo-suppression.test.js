@@ -588,3 +588,26 @@ test('hiding effects does not disturb their identifiers', async (t) => {
   assert.deepStrictEqual(device.effectCatalog().identifiers, before, 'and hiding assigns nothing new');
   assert.strictEqual(device.nameForIdentifier(before.Sunrise), 'Sunrise', 'a hidden effect keeps its slot');
 });
+
+/**
+ * A context written by an older version can hold the right effect names and
+ * still be missing a field added since. Comparing only the names would
+ * short-circuit the write and leave that field empty forever.
+ */
+test('an outdated cached context is rewritten even when the list matches', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+  announceEffects(bridge, ['Night', 'Sunrise']);
+
+  const catalog = device.effectCatalog();
+  // What v0.8.1 wrote: names and identifiers, no deviceId.
+  const stale = { effectNames: catalog.effectNames, identifiers: catalog.identifiers };
+
+  const current = { deviceId: DEVICE_ID, ...catalog };
+  const namesMatch =
+    stale.effectNames.length === current.effectNames.length &&
+    stale.effectNames.every((n, i) => n === current.effectNames[i]);
+  assert.ok(namesMatch, 'the lists are identical, which is what made this bite');
+  assert.notStrictEqual(stale.deviceId, current.deviceId, 'yet the context is out of date');
+});
