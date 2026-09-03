@@ -3,10 +3,11 @@
 A Homebridge dynamic platform plugin for Govee lights exposed through a
 [govee2mqtt](https://github.com/wez/govee2mqtt) (`gv2mqtt`) bridge.
 
-For each configured (or auto-discovered) physical device it creates a
-Lightbulb for on/off/brightness/color, a Television-style accessory whose
-"Inputs" are that device's real scene/music/DIY effects, and optionally an
-Alert switch. The
+For each configured (or auto-discovered) physical device it creates a pair
+of accessories by default: a Lightbulb for on/off/brightness/color, and a
+Television-style accessory whose "Inputs" are that device's real
+scene/music/DIY effects (droppable with `enableEffects: false`). A third,
+an Alert switch, is opt-in per device with `enableAlert: true`. The
 Television-as-effect-picker is a deliberate hack — HomeKit's Lightbulb
 service has no concept of a named effect, but Television/InputSource does.
 
