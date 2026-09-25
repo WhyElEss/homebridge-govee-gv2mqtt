@@ -8,6 +8,7 @@
   .gv-title { font-weight: 600; }
   .gv-sub { font-size: .82rem; opacity: .7; }
   .gv-badge { margin-left: auto; font-size: .8rem; opacity: .8; font-variant-numeric: tabular-nums; }
+  .gv-badge + .gv-badge { margin-left: .6rem; }
   .gv-badge.gv-warn { color: #d9534f; opacity: 1; font-weight: 600; }
   .gv-badge.gv-off { color: #d9534f; opacity: .9; }
   .gv-body { padding: .7rem .85rem .85rem; }
@@ -72,7 +73,8 @@
       { key: 'haStatusTopic', label: 'Status (birth) topic', type: 'text', placeholder: '<discovery prefix>/status' },
       { key: 'optimisticCacheMs', label: 'Echo window (ms)', type: 'number', placeholder: '10000',
         hint: 'How long a property we just commanded ignores the device’s reports' },
-      { key: 'periodicRefreshIntervalMs', label: 'Periodic refresh (ms)', type: 'number', placeholder: '0 (off)' },
+      { key: 'periodicRefreshIntervalMs', label: 'Periodic refresh (ms)', type: 'number', placeholder: '600000',
+        hint: 'How often gv2mqtt is asked to re-announce devices; 0 = never' },
       { key: 'refreshStateOnConnect', label: 'Ask gv2mqtt to republish on connect', type: 'boolean', fallback: true },
       { key: 'autoDiscover', label: 'Auto-discover devices', type: 'boolean', fallback: false },
     ];
@@ -106,6 +108,9 @@
     let config;
     let platform;
     let catalogs = new Map();
+    // deviceId -> kinds of accessory it has in HomeKit right now; null when
+    // the running plugin predates this and the page can't tell.
+    let exposed = null;
 
     /**
      * Stages the whole config in memory. Nothing is written to config.json
@@ -346,23 +351,36 @@
       body.className = 'gv-body';
       card.append(body);
 
+      // A device whose accessories were taken out because gv2mqtt stopped
+      // announcing it - removed from the Govee account. Its entry is kept so
+      // its settings survive if it comes back; Remove clears it for good.
+      const absent = document.createElement('span');
+      absent.className = 'gv-badge gv-off';
+      absent.textContent = 'not in HomeKit';
       const retitle = () => {
         title.textContent = device.name || '(unnamed device)';
         sub.textContent = device.deviceId || 'no device ID';
         summary.classList.toggle('gv-off', device.enabled === false);
+        absent.style.display = exposed && device.enabled !== false && !exposed[device.deviceId] ? '' : 'none';
       };
+      summary.append(absent);
 
-      const basics = DEVICE_FIELDS.basics.map((d) =>
-        d.key === 'name' || d.key === 'deviceId' ? { ...d, onChange: retitle } : d);
+      // A humidifier's night light is part of its own accessory, with none of
+      // a lamp's colour-temperature, effects or alert settings.
+      const humidifier = !!exposed && (exposed[device.deviceId] || []).includes('humidifier');
+      const basics = DEVICE_FIELDS.basics
+        .filter((d) => !humidifier || ['name', 'deviceId', 'enabled'].includes(d.key))
+        .map((d) => (d.key === 'name' || d.key === 'deviceId' ? { ...d, onChange: retitle } : d));
       body.append(group('Basics', device, basics));
-      body.append(group('Colour', device, DEVICE_FIELDS.colour));
-      body.append(group('Alert switch', device, DEVICE_FIELDS.alert));
-      body.append(group('Startup', device, DEVICE_FIELDS.startup));
-
-      const effects = effectsBlock(device);
-      body.append(effects.section);
-      if (effects.badge) {
-        summary.append(effects.badge);
+      if (!humidifier) {
+        body.append(group('Colour', device, DEVICE_FIELDS.colour));
+        body.append(group('Alert switch', device, DEVICE_FIELDS.alert));
+        body.append(group('Startup', device, DEVICE_FIELDS.startup));
+        const effects = effectsBlock(device);
+        body.append(effects.section);
+        if (effects.badge) {
+          summary.append(effects.badge);
+        }
       }
 
       // Confirmation is done inline rather than with window.confirm(): the
@@ -444,6 +462,7 @@
         platform.devices = [];
       }
       catalogs = new Map((discovered.devices || []).map((d) => [d.deviceId, d.effects]));
+      exposed = discovered.exposed || null;
 
       document.getElementById('gv-lead').textContent =
         'Every device is a card with all of its settings, including which of its effects reach HomeKit. '

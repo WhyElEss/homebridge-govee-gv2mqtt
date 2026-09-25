@@ -1,7 +1,8 @@
 # homebridge-govee-gv2mqtt
 
-A Homebridge dynamic platform plugin for Govee lights exposed through a
-[govee2mqtt](https://github.com/wez/govee2mqtt) (`gv2mqtt`) bridge.
+A Homebridge dynamic platform plugin for Govee lights and humidifiers
+exposed through a [govee2mqtt](https://github.com/wez/govee2mqtt)
+(`gv2mqtt`) bridge.
 
 For each configured (or auto-discovered) physical device it creates a pair
 of accessories by default: a Lightbulb for on/off/brightness/color, and a
@@ -10,6 +11,8 @@ scene/music/DIY effects (droppable with `enableEffects: false`). A third,
 an Alert switch, is opt-in per device with `enableAlert: true`. The
 Television-as-effect-picker is a deliberate hack — HomeKit's Lightbulb
 service has no concept of a named effect, but Television/InputSource does.
+A humidifier gets a single accessory instead, holding the humidifier and its
+night light (see [Humidifiers](#humidifiers)).
 
 ## Device compatibility
 
@@ -24,6 +27,11 @@ A static 96-name fallback list in [src/effects.ts](src/effects.ts) — modeled
 on the Table Lamp 2's effects — is used only for the first ~15s after a
 restart, before that device's real list has been discovered, or if discovery
 never arrives for some reason. It's a stopgap, not a source of truth.
+
+Humidifier support was built and tested against a **GoveeLife Smart
+Humidifier Lite (H7140)**. It uses gv2mqtt's generic humidifier topics and
+the Govee Platform API capabilities that model reports; other humidifiers
+have not been tested.
 
 ## What each accessory does
 
@@ -45,9 +53,73 @@ For every known device the platform creates:
   "flash this light, then put it back exactly how it was" automations. See
   [Alert switch](#alert-switch-flash-and-restore-for-automations) below.
 
-Both accessories for a device share one `GoveeDevice` instance
+All of a light's accessories share one `GoveeDevice` instance
 ([src/govee-device.ts](src/govee-device.ts)) that owns all MQTT
 subscription/publish logic and cached state for that physical light.
+
+## Humidifiers
+
+A humidifier is one accessory, `<name>`, with two services — shown as one
+tile, or as two with *Show as Separate Tiles* in the accessory's settings in
+the Home app ([src/humidifier.ts](src/humidifier.ts)):
+
+- **Humidifier** (HomeKit's HumidifierDehumidifier service). Its main control
+  is power. The **mist level** is the service's speed (RotationSpeed), which
+  the Home app shows as *Fan Speed* in the accessory's settings. The H7140
+  has nine levels — Govee's Platform API lists the Manual work mode's
+  `modeValue` as 1–9, and all nine were checked on the device — so the
+  slider is split into nine bands (level 5 shows as 55%, level 9 as 100%);
+  0% is level 1, not off. Setting a level puts the device into its Manual
+  work mode. A level set while the device is off is sent right after it is
+  switched on. In testing, moving the slider in the Home app also switched
+  the humidifier on: Home sends an On write together with the speed.
+  HomeKit makes *Current Relative Humidity* mandatory on this service; the
+  device has no humidity sensor, so it stays at 0%. For automations, use a
+  humidity sensor in the room (a HomePod mini has one) as the trigger and
+  switch the humidifier on or off as the action.
+- **Night Light** (Lightbulb): on/off, colour and brightness. No colour
+  temperature — the device has none. The light works with the mist off.
+  Measured on the device: switching the humidifier off puts the light out
+  too, and switching it on brings the light back as it was, colour and
+  brightness included; HomeKit follows the same rule immediately rather
+  than waiting for the device to report it.
+
+Not exposed:
+
+- **Target humidity.** It only drives the Auto work mode, which on the H7140
+  needs a separately paired Govee thermo-hygrometer
+  ([manual](https://manuals.plus/goveelife/h7140-smart-humidifier-lite-manual));
+  the device has no humidity sensor of its own.
+- **An empty tank.** The device switches itself off when it runs dry, and
+  that "off" reaches HomeKit like any other state change. Govee lists a
+  `lackWaterEvent` capability for the H7140, but during testing neither its
+  event broker nor the device-state API reported one — with the tank
+  emptied, and with the water running out while misting.
+
+gv2mqtt drives this device over Govee's cloud API and learns the result by
+polling a few seconds later, so a report can predate the command it follows.
+As for lights, a report on a property is believed within `optimisticCacheMs`
+of a command only if it agrees with it. gv2mqtt only polls after a command
+Govee accepted, so one that was rejected — the device offline — would
+otherwise leave HomeKit showing a state the device isn't in; one second after
+that window the plugin therefore asks gv2mqtt for a fresh poll itself (its
+`request-platform-data` topic). While Govee reports the device offline
+(`online: false` in gv2mqtt's status sensor), HomeKit shows it as *No
+Response* and nothing is sent. Light changes are gathered for 350 ms and
+only the values that differ from what the device has go out, since each is
+its own Govee cloud call.
+
+Topics used (all gv2mqtt's): power `gv2mqtt/switch/<id>/command/powerSwitch`,
+mist level `gv2mqtt/number/<id>/command/manual/1`, night light
+`gv2mqtt/switch/<id>/command/nightlightToggle` and `gv2mqtt/light/<id>/command`;
+reports on `gv2mqtt/humidifier/<id>/state`, `gv2mqtt/number/<id>/state/manual`,
+`gv2mqtt/switch/<id>/nightlightToggle/state` and `gv2mqtt/light/<id>/state`.
+gv2mqtt also announces a humidifier's night light as a light entity; the
+plugin ignores it, since the light is part of the humidifier's accessory,
+and removes a separate light accessory an earlier version made for it.
+On the settings page a humidifier's card shows only its name, device ID and
+Enabled checkbox; the colour, alert, startup and effects settings are the
+lamps'.
 
 ## Install
 
@@ -134,16 +206,30 @@ so you don't need to know/type any `deviceId` up front. Each newly-found
 device is **also written into this platform's `devices[]` array in
 config.json**, exactly as if you'd added it by hand — open the plugin's
 settings page afterwards and it's right there with its name and device ID.
+The plugin watches gv2mqtt's discovery configs for *light* and *humidifier*
+entities (`<haDiscoveryPrefix>/light/gv2mqtt-<id>/config` and
+`<haDiscoveryPrefix>/humidifier/gv2mqtt-<id>-humidifier/config`).
 
-Two things to know about what auto-discovery will pick up. It watches
-`<haDiscoveryPrefix>/light/gv2mqtt-<id>/config`, so anything gv2mqtt
-publishes as a *light* entity lands in the list — that need not be a lamp
-(a Govee humidifier turned up this way on the author's setup). And nothing
-ever removes an entry: if a device disappears from your Govee account,
-gv2mqtt stops announcing it, its accessories are pruned, but its
-`devices[]` entry stays where it is. Deleting user configuration
-automatically would be the wrong default, so that is a button on the
-device's card in the settings page.
+**A device added in the Govee app.** gv2mqtt re-reads the device list from
+Govee every 10 minutes, through a cache it keeps for up to 15 (`soft_ttl =
+900s` in its `platform_api.rs`), but it announces devices only at its own
+startup, when it sees the Home Assistant "birth" message, and on
+`purge-caches` (its `serve.rs` and `hass.rs`). A device it learns about
+later is announced to nobody — which is why restarting Homebridge could
+miss a device just added in the Govee app. The plugin therefore sends the
+birth message every `periodicRefreshIntervalMs` (default 10 minutes), and a
+new device reaches HomeKit on its own, typically within 10–35 minutes.
+
+**A device removed from the Govee account.** gv2mqtt keeps every device it
+has seen until it restarts, so it stops announcing one only after its next
+restart. Once gv2mqtt has gone an hour announcing other devices but not this
+one, the plugin takes its accessories out of HomeKit. That is judged only
+while announcements are demonstrably flowing — periodic refresh on, and
+gv2mqtt having announced something within the last two intervals — so an
+outage of gv2mqtt, the broker or Govee's API removes nothing. The device's
+`devices[]` entry is kept, so its settings come back if it returns; the
+settings page marks it **not in HomeKit**, and its Remove button deletes the
+entry for good.
 
 Two ways an already-known device stops getting (re-)exposed:
 
@@ -157,9 +243,10 @@ Two ways an already-known device stops getting (re-)exposed:
 
 Without `autoDiscover`, `devices[]` is the only source of truth (an
 allowlist — nothing shows up in HomeKit unless it's listed), the safer
-default for a shared/production Home setup. New devices are picked up as
-gv2mqtt announces them, which (like the effect list and state refresh below)
-depends on `refreshStateOnConnect`/`periodicRefreshIntervalMs`.
+default for a shared/production Home setup. What gv2mqtt announces is then
+used only to tell which kind of accessory a listed device needs (a light or
+a humidifier), and to take out the accessories of a listed device it stops
+announcing, as above.
 
 Writing to `devices[]` in config.json from the *running platform* isn't an
 officially supported thing for a Homebridge plugin to do — the supported
@@ -395,10 +482,10 @@ inside the plugin the moment the switch is toggled.
   own next fetch like any stock scene. Neither this topic nor the state
   topic is retained by gv2mqtt, so a fresh subscribe alone reveals nothing —
   both only arrive after gv2mqtt's own startup or after this plugin pings
-  the Home Assistant "birth" topic (next bullet). Set
-  `periodicRefreshIntervalMs` to periodically re-trigger this (e.g. to pick
-  up a newly-created DIY scene, or — with `autoDiscover` — a newly-added
-  device) without restarting Homebridge.
+  the Home Assistant "birth" topic (next bullet), which it also does every
+  `periodicRefreshIntervalMs` (default 10 minutes) — that is what picks up
+  a newly-created DIY scene or, with `autoDiscover`, a newly-added device
+  without restarting Homebridge.
 - **Stable effect Identifiers**: HomeKit correlates a Television's "Inputs"
   by a numeric `Identifier`, not by name, and Govee's API doesn't guarantee
   `effect_list` comes back in the same order on every refresh. This plugin
@@ -531,3 +618,12 @@ Govee's spurious OFF blip after an effect/color command. A silent mock —
 one that accepts commands and never reports anything back — hides the
 entire "whose change is it" class of bug described above, because that bug
 lives only in what the plugin does with a device's unsolicited reports.
+The humidifier tests follow the same rule: gv2mqtt's mock reports late, and
+a report can predate the command it follows.
+
+`test/platform-discovery.test.js` runs the platform itself against a mock
+broker and the real HAP-NodeJS with mocked timers: what gets exposed when
+gv2mqtt announces a device, and — since removing an accessory by mistake
+loses every scene and automation built on it — that removal happens after
+an hour of other devices being announced, and never on silence alone or
+with periodic refresh turned off.

@@ -22,9 +22,49 @@ import { GoveeDevice } from './govee-device';
 import { LightAccessory } from './light-accessory';
 import { EffectsAccessory } from './effects-accessory';
 import { AlertAccessory } from './alert-accessory';
+import { GoveeHumidifier } from './humidifier';
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** The gv2mqtt entity kinds this plugin turns into accessories. */
+type EntityKind = 'light' | 'humidifier';
+
+/**
+ * How long gv2mqtt may go without announcing a device we expose before its
+ * accessories are taken out of HomeKit. Only counted while gv2mqtt is
+ * demonstrably announcing other devices (see pruneUnannounced), so an outage
+ * of gv2mqtt, the broker or Govee's API never removes anything.
+ */
+const REMOVE_UNANNOUNCED_AFTER_MS = 60 * 60 * 1000;
+const PRUNE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * Kept in the context of the accessories this plugin creates, so the settings
+ * page (homebridge-ui/server.js) can tell which configured devices have any.
+ */
+interface DeviceContext {
+  deviceId?: string;
+  kind?: EntityKind;
+}
+
+/** One configured (or discovered) physical device and whatever runs for it. */
+interface DeviceRuntime {
+  resolved: ResolvedDeviceConfig;
+  /**
+   * Created at most once per run and kept even if the device's accessories are
+   * pruned: they hold MQTT listeners, so a device that disappears and comes
+   * back gets new accessories around the same instance.
+   */
+  light?: GoveeDevice;
+  humidifier?: GoveeHumidifier;
+  /** Which kinds currently have accessories in HomeKit. */
+  exposed: Set<EntityKind>;
+}
+
+interface DiscoveryPayload {
+  device?: { name?: unknown };
 }
 
 export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
@@ -33,8 +73,16 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
 
   /** Cached accessories restored from disk, keyed by UUID, plus any newly registered. */
   private readonly accessories = new Map<string, PlatformAccessory>();
-  /** Device IDs registered so far this run, whether from config or auto-discovery. */
+  /** UUIDs of accessories set up this run; everything else in `accessories` is stale. */
+  private readonly builtUuids = new Set<string>();
+  /** Device IDs listed in config.json's devices[], enabled or not, plus any persisted this run. */
   private readonly knownDeviceIds = new Set<string>();
+  private readonly runtimes = new Map<string, DeviceRuntime>();
+  /** When gv2mqtt last announced each entity, keyed "<deviceId>:<kind>". */
+  private readonly lastAnnounced = new Map<string, number>();
+  /** When gv2mqtt last announced anything at all. */
+  private lastAnyAnnouncement = 0;
+  private readonly startedAt = Date.now();
   /** Platform-level config with all defaults applied. */
   private readonly settings: ResolvedPlatformConfig;
   private client?: MqttClient;
@@ -76,12 +124,11 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
 
     const pingHomeAssistantBirth = () => {
       // gv2mqtt doesn't retain its state or discovery-config topics, so a
-      // fresh subscribe alone reveals neither a light's actual current state,
-      // its real per-device effect list, nor (with autoDiscover) which
-      // devices even exist. It does, however, republish full discovery
-      // config + state for every device whenever it sees a message on the
-      // Home Assistant "birth" topic (thinking HA just restarted) - so we
-      // piggyback on that for all three instead of waiting indefinitely.
+      // fresh subscribe alone reveals neither a device's actual current
+      // state, a light's real effect list, nor which devices even exist. It
+      // does, however, republish full discovery config + state for every
+      // device whenever it sees a message on the Home Assistant "birth" topic
+      // (thinking HA just restarted) - so we piggyback on that for all three.
       this.client!.publish(cfg.haStatusTopic, 'online');
     };
 
@@ -94,16 +141,21 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 
+    // gv2mqtt re-reads the device list from Govee every 10 minutes, but a
+    // device it learns about that way is announced to nobody: it publishes
+    // discovery configs only at its own startup, on the birth topic, and on
+    // purge-caches (wez/govee2mqtt src/commands/serve.rs, service/hass.rs).
+    // Asking periodically is what lets a device added in the Govee app reach
+    // HomeKit without restarting anything - and the steady stream of
+    // announcements is also what lets pruneUnannounced notice one that's gone.
     if (cfg.refreshStateOnConnect && cfg.periodicRefreshIntervalMs > 0) {
       setInterval(() => pingHomeAssistantBirth(), cfg.periodicRefreshIntervalMs);
     }
 
-    // A newly auto-discovered device's own GoveeDevice subscribes to its
-    // discovery-config topic *after* this burst of messages already went by,
-    // so it starts out on the fallback effect list. Ping again shortly after
-    // discovery quiets down so it picks up its real list without waiting for
-    // the next reconnect/periodic refresh. Debounced so a whole burst of new
-    // devices only triggers one extra ping.
+    // A newly discovered device subscribes to its own topics *after* the burst
+    // that revealed it has gone by. Ping again once the burst quiets down so it
+    // gets its real state and effect list straight away. Debounced so a burst
+    // of several new devices only triggers one extra ping.
     let rediscoveryPingTimer: NodeJS.Timeout | undefined;
     const scheduleFollowUpPing = () => {
       if (!cfg.refreshStateOnConnect) {
@@ -122,93 +174,222 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         this.log.info(`"${resolved.name}" (${resolved.deviceId}) is disabled; not exposing it.`);
         continue;
       }
-      this.registerDevice(resolved);
+      this.restoreDevice(this.createRuntime(resolved));
     }
 
-    if (cfg.autoDiscover) {
-      this.setupAutoDiscovery(scheduleFollowUpPing);
-    }
+    this.setupDiscovery(scheduleFollowUpPing);
 
     // With autoDiscover, newly-found devices only show up asynchronously as
     // MQTT discovery messages arrive (typically within ~15s of the birth
     // ping above), so pruning immediately would delete their just-restored
-    // cached accessories before we've had a chance to reconfirm them. Delay
-    // pruning to give that a chance to happen first; without autoDiscover,
-    // the expected device set is fully known synchronously, so prune right
-    // away as before.
+    // cached accessories before we've had a chance to reconfirm them.
     const pruneDelayMs = cfg.autoDiscover ? 20000 : 0;
-    setTimeout(() => this.pruneStaleAccessories(cfg.devices), pruneDelayMs);
+    setTimeout(() => this.pruneUnbuilt(), pruneDelayMs);
+
+    setInterval(() => this.pruneUnannounced(), PRUNE_CHECK_INTERVAL_MS);
+  }
+
+  private createRuntime(resolved: ResolvedDeviceConfig): DeviceRuntime {
+    const runtime: DeviceRuntime = { resolved, exposed: new Set() };
+    this.runtimes.set(resolved.deviceId, runtime);
+    return runtime;
+  }
+
+  private uuidFor(key: string): string {
+    return this.api.hap.uuid.generate(`${PLUGIN_NAME}:${key}`);
   }
 
   /**
-   * Subscribes to the wildcard form of the per-device Home Assistant MQTT
-   * discovery config topic (see resolveDeviceConfig's discoveryConfigTopic)
-   * to learn which Govee devices exist on this gv2mqtt bridge without the
-   * user having to list every deviceId by hand. The regex both extracts the
-   * device ID from the topic and filters out unrelated MQTT lights that
-   * might share the same broker/discovery prefix but weren't published by
-   * gv2mqtt (their unique_id won't match "gv2mqtt-<id>").
-   *
-   * gv2mqtt also publishes one extra discovery config per addressable LED
-   * segment on segmented devices, with a unique_id of "gv2mqtt-<id>-<n>" -
-   * these are sub-entities of a device already covered by its main config,
-   * not separate physical devices, and are skipped (real device IDs are
-   * plain hex with no hyphen, so a trailing "-<digits>" is unambiguous).
-   *
-   * Newly-found devices are both registered in-memory and persisted into
-   * this platform's `devices` array in config.json, so they show up in
-   * Config UI X's normal settings form exactly as if added by hand - from
-   * then on they're "explicit" and autoDiscover leaves them alone.
+   * Sets up at startup whatever this device had in HomeKit last run, before
+   * gv2mqtt has said anything - the discovery burst is ~17s away and HomeKit
+   * should not see accessories vanish and come back in the meantime. A device
+   * with nothing cached (added by hand) starts as a light, as it always has.
    */
-  private setupAutoDiscovery(scheduleFollowUpPing: () => void): void {
-    const { topicPrefix, haDiscoveryPrefix } = this.settings;
-    const topicPattern = new RegExp(`^${escapeRegExp(haDiscoveryPrefix)}/light/gv2mqtt-([^/]+)/config$`);
+  private restoreDevice(runtime: DeviceRuntime): void {
+    const id = runtime.resolved.deviceId;
+    if (this.accessories.has(this.uuidFor(`${id}-humidifier`))) {
+      this.exposeHumidifier(runtime);
+    } else {
+      this.exposeLight(runtime);
+    }
+  }
+
+  /**
+   * Watches gv2mqtt's Home Assistant discovery configs for light and
+   * humidifier entities. The topic is literally
+   * "{prefix}/{integration}/{unique_id}/config" (gv2mqtt's
+   * publish_entity_config); a light's unique_id is "gv2mqtt-<id>", a
+   * humidifier's "gv2mqtt-<id>-humidifier". Anything else sharing the broker
+   * and prefix doesn't match and is ignored.
+   *
+   * gv2mqtt also publishes one extra light config per addressable LED segment
+   * on segmented devices, "gv2mqtt-<id>-<n>" - sub-entities of a device
+   * already covered by its main config, skipped (real device IDs are plain hex
+   * with no hyphen, so a trailing "-<digits>" is unambiguous).
+   *
+   * Every announcement is recorded for pruneUnannounced. With autoDiscover, a
+   * device seen for the first time is also exposed and persisted into this
+   * platform's devices[] in config.json, so it shows up in the settings page
+   * exactly as if added by hand - from then on it's "explicit".
+   */
+  private setupDiscovery(scheduleFollowUpPing: () => void): void {
+    const prefix = escapeRegExp(this.settings.haDiscoveryPrefix);
+    const lightTopic = new RegExp(`^${prefix}/light/gv2mqtt-([^/]+)/config$`);
+    const humidifierTopic = new RegExp(`^${prefix}/humidifier/gv2mqtt-([^/-]+)-humidifier/config$`);
     const segmentSuffix = /-\d+$/;
 
-    this.client!.subscribe(`${haDiscoveryPrefix}/light/+/config`, (err) => {
-      if (err) {
-        this.log.warn(`autoDiscover: failed to subscribe for new devices: ${err.message}`);
-      }
-    });
+    for (const kind of ['light', 'humidifier']) {
+      this.client!.subscribe(`${this.settings.haDiscoveryPrefix}/${kind}/+/config`, (err) => {
+        if (err) {
+          this.log.warn(`discovery: failed to subscribe to ${kind} configs: ${err.message}`);
+        }
+      });
+    }
 
     this.client!.on('message', (topic, payload) => {
-      const match = topicPattern.exec(topic);
-      if (!match) {
-        return;
+      let kind: EntityKind;
+      let match = lightTopic.exec(topic);
+      if (match) {
+        if (segmentSuffix.test(match[1])) {
+          return;
+        }
+        kind = 'light';
+      } else {
+        match = humidifierTopic.exec(topic);
+        if (!match) {
+          return;
+        }
+        kind = 'humidifier';
       }
-      const deviceId = match[1];
-      if (segmentSuffix.test(deviceId) || this.knownDeviceIds.has(deviceId)) {
-        return;
-      }
-
-      let name = deviceId;
+      let parsed: DiscoveryPayload = {};
       try {
-        const parsed = JSON.parse(payload.toString());
-        name = parsed?.device?.name || parsed?.name || deviceId;
+        parsed = JSON.parse(payload.toString()) ?? {};
       } catch {
-        // Fall back to the raw device ID as the display name.
+        // Still an announcement; the name falls back below.
       }
+      this.onAnnouncement(kind, match[1], parsed, scheduleFollowUpPing);
+    });
+  }
 
+  private onAnnouncement(
+    kind: EntityKind,
+    deviceId: string,
+    parsed: DiscoveryPayload,
+    scheduleFollowUpPing: () => void,
+  ): void {
+    const now = Date.now();
+    this.lastAnyAnnouncement = now;
+    this.lastAnnounced.set(`${deviceId}:${kind}`, now);
+
+    let runtime = this.runtimes.get(deviceId);
+    if (!runtime) {
+      if (this.knownDeviceIds.has(deviceId) || !this.settings.autoDiscover) {
+        return; // disabled in config, or not on the allowlist
+      }
+      const name = typeof parsed.device?.name === 'string' && parsed.device.name ? parsed.device.name : deviceId;
       this.log.info(`autoDiscover: found new device "${name}" (${deviceId}), adding it to devices[] in config.json`);
-      const resolved = resolveDeviceConfig({ deviceId, name }, topicPrefix, haDiscoveryPrefix);
-      this.registerDevice(resolved);
       this.knownDeviceIds.add(deviceId);
       this.persistDiscoveredDevice(deviceId, name);
+      const { topicPrefix, haDiscoveryPrefix } = this.settings;
+      runtime = this.createRuntime(resolveDeviceConfig({ name, deviceId }, topicPrefix, haDiscoveryPrefix));
       scheduleFollowUpPing();
-    });
+    }
+
+    // gv2mqtt announces a humidifier's night light as a light entity too; that
+    // light is a service of the humidifier's own accessory instead.
+    const isHumidifier = runtime.exposed.has('humidifier') || this.lastAnnounced.has(`${deviceId}:humidifier`);
+    if ((kind === 'light' && isHumidifier) || runtime.exposed.has(kind)) {
+      return;
+    }
+    if (runtime.light || runtime.humidifier) {
+      this.log.info(`"${runtime.resolved.name}" (${deviceId}): gv2mqtt announces its ${kind}, adding it to HomeKit`);
+    }
+    if (kind === 'light') {
+      this.exposeLight(runtime);
+    } else {
+      this.exposeHumidifier(runtime);
+    }
+  }
+
+  private exposeLight(runtime: DeviceRuntime): void {
+    const resolved = runtime.resolved;
+    const id = resolved.deviceId;
+    if (!runtime.light) {
+      runtime.light = new GoveeDevice(this.client!, resolved, this.settings.optimisticCacheMs, this.log);
+    }
+    const device = runtime.light;
+
+    const light = this.addOrRestoreAccessory(
+      `${id}-light`,
+      resolved.name,
+      this.api.hap.Categories.LIGHTBULB,
+      (accessory) => new LightAccessory(this, accessory, device),
+    );
+    this.writeContext(light, { deviceId: id, kind: 'light' });
+
+    if (resolved.enableEffects) {
+      this.addOrRestoreAccessory(
+        `${id}-effects`,
+        `${resolved.name} Effects`,
+        this.api.hap.Categories.TELEVISION,
+        (accessory) => new EffectsAccessory(this, accessory, device),
+      );
+    }
+
+    if (resolved.enableAlert) {
+      this.addOrRestoreAccessory(
+        `${id}-alert`,
+        `${resolved.name} Alert`,
+        this.api.hap.Categories.SWITCH,
+        (accessory) => new AlertAccessory(this, accessory, device),
+      );
+    }
+    runtime.exposed.add('light');
+  }
+
+  private exposeHumidifier(runtime: DeviceRuntime): void {
+    const id = runtime.resolved.deviceId;
+    if (!runtime.humidifier) {
+      runtime.humidifier = new GoveeHumidifier(this, this.client!, runtime.resolved, this.settings.optimisticCacheMs, this.log);
+    }
+    const humidifier = runtime.humidifier;
+    const accessory = this.addOrRestoreAccessory(
+      `${id}-humidifier`,
+      runtime.resolved.name,
+      this.api.hap.Categories.AIR_HUMIDIFIER,
+      (acc) => humidifier.attach(acc),
+    );
+    this.writeContext(accessory, { deviceId: id, kind: 'humidifier' });
+    runtime.exposed.add('humidifier');
+
+    // A light set up before gv2mqtt revealed this is a humidifier (a device
+    // added by hand, or its light config coming first in the burst) goes: the
+    // night light is part of this accessory.
+    if (runtime.exposed.has('light')) {
+      this.unregister([`${id}-light`, `${id}-effects`, `${id}-alert`].map((k) => this.uuidFor(k)));
+      runtime.exposed.delete('light');
+    }
+  }
+
+  /** Persists a context only when it actually changed, so a restart writes nothing. */
+  private writeContext(accessory: PlatformAccessory, context: DeviceContext): void {
+    const merged = { ...accessory.context, ...context };
+    if (JSON.stringify(accessory.context) === JSON.stringify(merged)) {
+      return;
+    }
+    accessory.context = merged;
+    this.api.updatePlatformAccessories([accessory]);
   }
 
   /**
    * Appends a newly auto-discovered device to this platform's `devices`
-   * array directly in config.json, so it appears in Config UI X's normal
-   * settings form (name, deviceId, an Enabled checkbox, etc) exactly as if
-   * the user had added it by hand. Not an officially supported way for a
-   * platform to persist config - Homebridge only guarantees that for a real
-   * Custom Plugin UI - so this re-reads and re-writes the whole file
-   * defensively (skips if the device is already there) rather than caching
-   * any in-memory copy, to minimize the window for clobbering a concurrent
-   * edit made through Config UI X. Formatting/comments in the original file
-   * are not preserved since the whole file is re-serialized.
+   * array directly in config.json, so it appears in the settings page (name,
+   * deviceId, an Enabled checkbox, etc) exactly as if the user had added it
+   * by hand. Re-reads and re-writes the whole file defensively (skips if the
+   * device is already there) rather than caching any in-memory copy, to
+   * minimize the window for clobbering a concurrent edit made through the
+   * UI. Formatting/comments in the original file are not preserved since the
+   * whole file is re-serialized.
    */
   private persistDiscoveredDevice(deviceId: string, name: string): void {
     const configPath = this.api.user.configPath();
@@ -245,42 +426,13 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
   }
 
-  private registerDevice(resolved: ResolvedDeviceConfig): void {
-    const device = new GoveeDevice(this.client!, resolved, this.settings.optimisticCacheMs, this.log);
-
-    this.addOrRestoreAccessory(
-      `${resolved.deviceId}-light`,
-      resolved.name,
-      this.api.hap.Categories.LIGHTBULB,
-      (accessory) => new LightAccessory(this, accessory, device),
-    );
-
-    if (resolved.enableEffects) {
-      this.addOrRestoreAccessory(
-        `${resolved.deviceId}-effects`,
-        `${resolved.name} Effects`,
-        this.api.hap.Categories.TELEVISION,
-        (accessory) => new EffectsAccessory(this, accessory, device),
-      );
-    }
-
-    if (resolved.enableAlert) {
-      this.addOrRestoreAccessory(
-        `${resolved.deviceId}-alert`,
-        `${resolved.name} Alert`,
-        this.api.hap.Categories.SWITCH,
-        (accessory) => new AlertAccessory(this, accessory, device),
-      );
-    }
-  }
-
   private addOrRestoreAccessory(
     key: string,
     displayName: string,
     category: number,
     build: (accessory: PlatformAccessory) => unknown,
-  ): void {
-    const uuid = this.api.hap.uuid.generate(`${PLUGIN_NAME}:${key}`);
+  ): PlatformAccessory {
+    const uuid = this.uuidFor(key);
     let accessory = this.accessories.get(uuid);
 
     if (accessory) {
@@ -293,38 +445,67 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     }
 
     this.accessories.set(uuid, accessory);
+    this.builtUuids.add(uuid);
     build(accessory);
+    return accessory;
   }
 
-  private pruneStaleAccessories(devices: DeviceConfig[]): void {
-    const deviceConfigById = new Map(devices.map((d) => [d.deviceId, d]));
-
-    const expectedUuids = new Set<string>();
-    for (const id of this.knownDeviceIds) {
-      const cfg = deviceConfigById.get(id);
-      if (cfg && cfg.enabled === false) {
-        continue;
-      }
-      expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-light`));
-      if (cfg?.enableEffects ?? true) {
-        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-effects`));
-      }
-      if (cfg?.enableAlert ?? false) {
-        expectedUuids.add(this.api.hap.uuid.generate(`${PLUGIN_NAME}:${id}-alert`));
-      }
-    }
-
-    const stale: PlatformAccessory[] = [];
-    for (const [uuid, accessory] of this.accessories) {
-      if (!expectedUuids.has(uuid)) {
-        stale.push(accessory);
-        this.accessories.delete(uuid);
-      }
-    }
-
+  /** Cached accessories nothing claimed this run: devices removed from config, disabled, or features turned off. */
+  private pruneUnbuilt(): void {
+    const stale = [...this.accessories.keys()].filter((uuid) => !this.builtUuids.has(uuid));
     if (stale.length > 0) {
       this.log.info(`Removing ${stale.length} stale accessory(ies) no longer present in config or discovery.`);
-      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, stale);
+      this.unregister(stale);
+    }
+  }
+
+  /**
+   * Takes out of HomeKit whatever gv2mqtt has stopped announcing - a device
+   * removed from the Govee account. gv2mqtt keeps every device it has seen
+   * until it restarts, so this happens after its next restart, not the moment
+   * the device is removed.
+   *
+   * Only judged while announcements are demonstrably flowing: periodic
+   * refresh must be on, and gv2mqtt must have announced *something* within
+   * the last two refresh intervals. Otherwise silence says nothing about any
+   * one device. The devices[] entry stays, so its settings come back if the
+   * device is ever added again.
+   */
+  private pruneUnannounced(): void {
+    const { refreshStateOnConnect, periodicRefreshIntervalMs } = this.settings;
+    const now = Date.now();
+    if (!refreshStateOnConnect || periodicRefreshIntervalMs <= 0) {
+      return;
+    }
+    if (now - this.lastAnyAnnouncement > 2 * periodicRefreshIntervalMs + 60000) {
+      return;
+    }
+    for (const runtime of this.runtimes.values()) {
+      for (const kind of [...runtime.exposed]) {
+        const id = runtime.resolved.deviceId;
+        const last = this.lastAnnounced.get(`${id}:${kind}`) ?? this.startedAt;
+        if (now - last < REMOVE_UNANNOUNCED_AFTER_MS) {
+          continue;
+        }
+        this.log.info(
+          `"${runtime.resolved.name}" (${id}): gv2mqtt hasn't announced its ${kind} for ` +
+            `${Math.round((now - last) / 60000)} min while announcing other devices; removing it from HomeKit.`,
+        );
+        const keys = kind === 'light' ? [`${id}-light`, `${id}-effects`, `${id}-alert`] : [`${id}-humidifier`];
+        this.unregister(keys.map((k) => this.uuidFor(k)));
+        runtime.exposed.delete(kind);
+      }
+    }
+  }
+
+  private unregister(uuids: string[]): void {
+    const gone = uuids.map((uuid) => this.accessories.get(uuid)).filter((a): a is PlatformAccessory => !!a);
+    for (const uuid of uuids) {
+      this.accessories.delete(uuid);
+      this.builtUuids.delete(uuid);
+    }
+    if (gone.length > 0) {
+      this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, gone);
     }
   }
 }

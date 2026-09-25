@@ -2,7 +2,7 @@
   "pluginAlias": "GoveeGv2Mqtt",
   "pluginType": "platform",
   "singular": true,
-  "headerDisplay": "Controls Govee lights through a [govee2mqtt](https://github.com/wez/govee2mqtt) bridge. Each device below becomes a Lightbulb accessory, plus an optional Television-style accessory used to pick Govee's scene/music/DIY effects for that specific device (auto-discovered from gv2mqtt; falls back to a static list if discovery is unavailable).",
+  "headerDisplay": "Controls Govee lights and humidifiers through a [govee2mqtt](https://github.com/wez/govee2mqtt) bridge. A humidifier becomes one accessory holding its power, mist level and night light. Each light becomes a Lightbulb accessory, plus an optional Television-style accessory used to pick Govee's scene/music/DIY effects for that specific device (auto-discovered from gv2mqtt; falls back to a static list if discovery is unavailable).",
   "schema": {
     "type": "object",
     "properties": {
@@ -61,9 +61,9 @@
       "periodicRefreshIntervalMs": {
         "title": "Periodic Refresh Interval (ms)",
         "type": "integer",
-        "default": 0,
+        "default": 600000,
         "minimum": 0,
-        "description": "Re-pings gv2mqtt on this interval so newly-created Govee DIY scenes and (with Auto-Discover Devices on) newly-added devices show up without a Homebridge restart. 0 disables periodic refresh (everything still refreshes on every MQTT reconnect)."
+        "description": "Asks gv2mqtt to re-announce every device on this interval. gv2mqtt learns about devices added to the Govee account on its own but tells nobody until asked, so this is what brings a new device (with Auto-Discover Devices on) and new DIY scenes into HomeKit without a restart, and what lets a device removed from the account be taken out of HomeKit. 0 turns it off."
       },
       "autoDiscover": {
         "title": "Auto-Discover Devices",

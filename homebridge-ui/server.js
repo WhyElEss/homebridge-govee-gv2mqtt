@@ -41,6 +41,8 @@ class GoveeUiServer extends HomebridgePluginUiServer {
 
     const devices = [];
     const seen = new Set();
+    // Which kinds of accessory each device has in HomeKit right now.
+    const exposed = {};
     for (const file of files) {
       let parsed;
       try {
@@ -53,7 +55,17 @@ class GoveeUiServer extends HomebridgePluginUiServer {
       }
       for (const accessory of parsed) {
         const context = accessory && accessory.context;
-        if (!context || !context.deviceId || !Array.isArray(context.effectNames)) {
+        if (!context || !context.deviceId) {
+          continue;
+        }
+        if (context.kind === 'light' || context.kind === 'humidifier') {
+          exposed[context.deviceId] = exposed[context.deviceId] || [];
+          if (!exposed[context.deviceId].includes(context.kind)) {
+            exposed[context.deviceId].push(context.kind);
+          }
+          continue;
+        }
+        if (!Array.isArray(context.effectNames)) {
           continue;
         }
         if (seen.has(context.deviceId)) {
@@ -68,7 +80,7 @@ class GoveeUiServer extends HomebridgePluginUiServer {
         });
       }
     }
-    return { devices };
+    return { devices, exposed };
   }
 }
 

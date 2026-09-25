@@ -79,7 +79,7 @@ export function resolvePlatformConfig(config: GoveePlatformConfig): ResolvedPlat
     refreshStateOnConnect: config.refreshStateOnConnect ?? true,
     haDiscoveryPrefix,
     haStatusTopic: config.haStatusTopic ?? `${haDiscoveryPrefix}/status`,
-    periodicRefreshIntervalMs: config.periodicRefreshIntervalMs ?? 0,
+    periodicRefreshIntervalMs: config.periodicRefreshIntervalMs ?? 600000,
     autoDiscover: config.autoDiscover ?? false,
     devices: config.devices ?? [],
   };
