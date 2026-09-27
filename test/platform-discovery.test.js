@@ -146,63 +146,129 @@ test('the light and effects an older version made for a humidifier are removed',
   assert.deepStrictEqual(names().filter((n) => n.includes(HUMIDIFIER) || n.startsWith('Smart')), ['Smart Humidifier Lite']);
 });
 
-test('the platform asks gv2mqtt to re-announce every 10 minutes by default', (t) => {
+test('no periodic re-announce by default: the birth message goes out only on connect', (t) => {
   timers(t);
   const { broker } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, devices: [lampConfig] });
+  broker.emit('connect');
   const births = () => broker.published.filter((p) => p.topic === 'homeassistant/status').length;
   const before = births();
-  t.mock.timers.tick(30 * MIN);
-  assert.strictEqual(births() - before, 3);
+  t.mock.timers.tick(60 * MIN);
+  assert.strictEqual(births() - before, 0);
 });
 
-test('a device gv2mqtt stops announcing is removed after an hour of others being announced', (t) => {
-  timers(t);
-  const { broker, names, savedDevices } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, devices: [lampConfig] });
+// ---- Following the Govee account through its device list ----------------
+
+const MAC = { [LAMP]: '18:DF:D0:C8:06:46:76:77', [HUMIDIFIER]: '14:26:D4:AD:FC:84:09:24', NEW1: 'AA:BB:CC:DD:EE:FF:00:11' };
+
+/** Replaces fetch with Govee's device list; `answer` can be changed between checks. */
+function mockGovee(t, ids) {
+  const state = { ids, ok: true, calls: 0 };
+  const original = global.fetch;
+  global.fetch = async () => {
+    state.calls++;
+    if (!state.ok) {
+      return { ok: false, status: 500, json: async () => ({ code: 500 }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ code: 200, data: state.ids.map((id) => ({ device: MAC[id] })) }) };
+  };
+  t.after(() => {
+    global.fetch = original;
+  });
+  return state;
+}
+
+/** Device-list tests keep setImmediate real: fetch's promises must be able to settle. */
+function listTimers(t) {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+}
+
+async function settle() {
+  for (let i = 0; i < 20; i++) {
+    await Promise.resolve();
+  }
+}
+
+async function runCheck(t, ms) {
+  t.mock.timers.tick(ms);
+  await settle();
+}
+
+test('without a Govee API key the device list is never read', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP]);
+  makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, devices: [lampConfig] });
+  await runCheck(t, 30 * MIN);
+  assert.strictEqual(govee.calls, 0);
+});
+
+test('a device added to the Govee account makes gv2mqtt announce, once', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const { broker } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] });
+  const births = () => broker.published.filter((p) => p.topic === 'homeassistant/status').length;
+  await runCheck(t, 30000); // baseline
+  const before = births();
+  await runCheck(t, 10 * MIN); // unchanged list
+  assert.strictEqual(births(), before, 'no announce while nothing changes');
+  govee.ids = [LAMP, HUMIDIFIER, 'NEW1'];
+  await runCheck(t, 10 * MIN);
+  assert.strictEqual(births(), before + 1);
+  await runCheck(t, 10 * MIN);
+  assert.strictEqual(births(), before + 1, 'and not again');
+});
+
+test('a device missing from the Govee list twice in a row leaves HomeKit, and gv2mqtt cannot bring it back', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const { broker, names, savedDevices } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] });
   announceLamp(broker);
   announceHumidifier(broker);
-  for (let i = 0; i < 7; i++) {
-    t.mock.timers.tick(10 * MIN);
-    announceLamp(broker);
-  }
+  await runCheck(t, 30000);
+  govee.ids = [LAMP];
+  await runCheck(t, 10 * MIN);
+  assert.ok(names().includes('Smart Humidifier Lite'), 'one miss is not enough');
+  await runCheck(t, 10 * MIN);
   assert.deepStrictEqual(names(), ['Table Lamp', 'Table Lamp Effects']);
   assert.ok(savedDevices().some((d) => d.deviceId === HUMIDIFIER), 'its config entry is kept');
+  announceHumidifier(broker); // gv2mqtt still remembers it until it restarts
+  assert.ok(!names().includes('Smart Humidifier Lite'));
 });
 
-test('silence from gv2mqtt as a whole removes nothing', (t) => {
-  timers(t);
-  const { broker, names } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, devices: [lampConfig] });
-  announceLamp(broker);
-  t.mock.timers.tick(5 * 60 * MIN);
-  assert.deepStrictEqual(names(), ['Table Lamp', 'Table Lamp Effects']);
-});
-
-test('nothing is removed with periodic refresh turned off', (t) => {
-  timers(t);
-  const { broker, names } = makePlatform({
-    mqttUrl: 'mqtt://x',
-    autoDiscover: true,
-    periodicRefreshIntervalMs: 0,
-    devices: [lampConfig, { name: 'Gone', deviceId: 'AAAA' }],
-  });
-  for (let i = 0; i < 12; i++) {
-    t.mock.timers.tick(10 * MIN);
-    announceLamp(broker);
-  }
-  assert.ok(names().includes('Gone'));
-});
-
-test('a removed device that comes back is exposed again', (t) => {
-  timers(t);
-  const { broker, names } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, devices: [lampConfig] });
+test('a removed device that returns to the account is exposed again', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const { broker, names } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] });
   announceLamp(broker);
   announceHumidifier(broker);
-  for (let i = 0; i < 7; i++) {
-    t.mock.timers.tick(10 * MIN);
-    announceLamp(broker);
-  }
+  await runCheck(t, 30000);
+  govee.ids = [LAMP];
+  await runCheck(t, 10 * MIN);
+  await runCheck(t, 10 * MIN);
   assert.ok(!names().includes('Smart Humidifier Lite'));
+  govee.ids = [LAMP, HUMIDIFIER];
+  const births = broker.published.filter((p) => p.topic === 'homeassistant/status').length;
+  await runCheck(t, 10 * MIN);
+  assert.strictEqual(broker.published.filter((p) => p.topic === 'homeassistant/status').length, births + 1);
   announceHumidifier(broker);
   assert.ok(names().includes('Smart Humidifier Lite'));
+});
+
+test('a failed or empty answer from Govee removes nothing', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const { broker, names } = makePlatform({ mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] });
+  announceLamp(broker);
+  announceHumidifier(broker);
+  await runCheck(t, 30000);
+  govee.ok = false;
+  await runCheck(t, 10 * MIN);
+  await runCheck(t, 10 * MIN);
+  govee.ok = true;
+  govee.ids = [];
+  await runCheck(t, 10 * MIN);
+  await runCheck(t, 10 * MIN);
+  assert.ok(names().includes('Smart Humidifier Lite'));
+  assert.ok(names().includes('Table Lamp'));
 });
 
 test('a disabled device is never exposed, whatever gv2mqtt announces', (t) => {

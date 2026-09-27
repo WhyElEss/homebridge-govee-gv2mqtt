@@ -50,6 +50,12 @@ export interface GoveePlatformConfig extends PlatformConfig {
   haDiscoveryPrefix?: string;
   periodicRefreshIntervalMs?: number;
   autoDiscover?: boolean;
+  /**
+   * The Govee API key gv2mqtt uses. With it the plugin reads Govee's device
+   * list every 10 minutes to follow devices added to or removed from the
+   * account - see GoveeGv2MqttPlatform.startDeviceListCheck.
+   */
+  goveeApiKey?: string;
   devices?: DeviceConfig[];
 }
 
@@ -65,6 +71,7 @@ export interface ResolvedPlatformConfig {
   haStatusTopic: string;
   periodicRefreshIntervalMs: number;
   autoDiscover: boolean;
+  goveeApiKey?: string;
   devices: DeviceConfig[];
 }
 
@@ -79,7 +86,8 @@ export function resolvePlatformConfig(config: GoveePlatformConfig): ResolvedPlat
     refreshStateOnConnect: config.refreshStateOnConnect ?? true,
     haDiscoveryPrefix,
     haStatusTopic: config.haStatusTopic ?? `${haDiscoveryPrefix}/status`,
-    periodicRefreshIntervalMs: config.periodicRefreshIntervalMs ?? 600000,
+    periodicRefreshIntervalMs: config.periodicRefreshIntervalMs ?? 0,
+    goveeApiKey: config.goveeApiKey || undefined,
     autoDiscover: config.autoDiscover ?? false,
     devices: config.devices ?? [],
   };

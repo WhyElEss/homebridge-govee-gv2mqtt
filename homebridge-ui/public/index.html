@@ -73,8 +73,9 @@
       { key: 'haStatusTopic', label: 'Status (birth) topic', type: 'text', placeholder: '<discovery prefix>/status' },
       { key: 'optimisticCacheMs', label: 'Echo window (ms)', type: 'number', placeholder: '10000',
         hint: 'How long a property we just commanded ignores the device’s reports' },
-      { key: 'periodicRefreshIntervalMs', label: 'Periodic refresh (ms)', type: 'number', placeholder: '600000',
-        hint: 'How often gv2mqtt is asked to re-announce devices; 0 = never' },
+      { key: 'periodicRefreshIntervalMs', label: 'Periodic refresh (ms)', type: 'number', placeholder: '0 (off)' },
+      { key: 'goveeApiKey', label: 'Govee API key', type: 'password',
+        hint: 'The key gv2mqtt uses; follows devices added to or removed from the Govee account' },
       { key: 'refreshStateOnConnect', label: 'Ask gv2mqtt to republish on connect', type: 'boolean', fallback: true },
       { key: 'autoDiscover', label: 'Auto-discover devices', type: 'boolean', fallback: false },
     ];

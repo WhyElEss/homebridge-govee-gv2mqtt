@@ -61,9 +61,14 @@
       "periodicRefreshIntervalMs": {
         "title": "Periodic Refresh Interval (ms)",
         "type": "integer",
-        "default": 600000,
+        "default": 0,
         "minimum": 0,
-        "description": "Asks gv2mqtt to re-announce every device on this interval. gv2mqtt learns about devices added to the Govee account on its own but tells nobody until asked, so this is what brings a new device (with Auto-Discover Devices on) and new DIY scenes into HomeKit without a restart, and what lets a device removed from the account be taken out of HomeKit. 0 turns it off."
+        "description": "Re-pings gv2mqtt on this interval so newly-created Govee DIY scenes and (with Auto-Discover Devices on) newly-added devices show up without a Homebridge restart. 0 disables periodic refresh (everything still refreshes on every MQTT reconnect)."
+      },
+      "goveeApiKey": {
+        "title": "Govee API Key",
+        "type": "string",
+        "description": "The key gv2mqtt uses. With it the plugin checks Govee's device list every 10 minutes: a device added to the account is announced by gv2mqtt and appears in HomeKit, and one missing from the list twice in a row is taken out of HomeKit."
       },
       "autoDiscover": {
         "title": "Auto-Discover Devices",
@@ -187,6 +192,7 @@
     "haStatusTopic",
     "periodicRefreshIntervalMs",
     "autoDiscover",
+    "goveeApiKey",
     {
       "key": "devices",
       "type": "array",

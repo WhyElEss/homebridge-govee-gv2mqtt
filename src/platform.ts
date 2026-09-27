@@ -31,14 +31,15 @@ function escapeRegExp(s: string): string {
 /** The gv2mqtt entity kinds this plugin turns into accessories. */
 type EntityKind = 'light' | 'humidifier';
 
+/** Govee's Platform API device list (developer.govee.com, "Get You Devices"). */
+const DEVICE_LIST_URL = 'https://openapi.api.govee.com/router/api/v1/user/devices';
+const DEVICE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+
 /**
- * How long gv2mqtt may go without announcing a device we expose before its
- * accessories are taken out of HomeKit. Only counted while gv2mqtt is
- * demonstrably announcing other devices (see pruneUnannounced), so an outage
- * of gv2mqtt, the broker or Govee's API never removes anything.
+ * A device must be missing from Govee's list this many checks in a row before
+ * it is taken out of HomeKit, so one odd answer removes nothing.
  */
-const REMOVE_UNANNOUNCED_AFTER_MS = 60 * 60 * 1000;
-const PRUNE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const MISSING_CHECKS_BEFORE_REMOVAL = 2;
 
 /**
  * Kept in the context of the accessories this plugin creates, so the settings
@@ -80,9 +81,16 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   private readonly runtimes = new Map<string, DeviceRuntime>();
   /** When gv2mqtt last announced each entity, keyed "<deviceId>:<kind>". */
   private readonly lastAnnounced = new Map<string, number>();
-  /** When gv2mqtt last announced anything at all. */
-  private lastAnyAnnouncement = 0;
-  private readonly startedAt = Date.now();
+  /** Device IDs in Govee's list at the last successful check; null before the first. */
+  private accountDeviceIds: Set<string> | null = null;
+  /** How many checks in a row each exposed device has been missing from Govee's list. */
+  private readonly missingChecks = new Map<string, number>();
+  /**
+   * Devices taken out of HomeKit because they left the Govee account. gv2mqtt
+   * keeps announcing a device until it restarts, so this stops the plugin
+   * from putting it straight back.
+   */
+  private readonly removedFromAccount = new Set<string>();
   /** Platform-level config with all defaults applied. */
   private readonly settings: ResolvedPlatformConfig;
   private client?: MqttClient;
@@ -141,13 +149,6 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     this.client.on('error', (err) => this.log.error(`MQTT error: ${err.message}`));
     this.client.on('reconnect', () => this.log.debug('Reconnecting to MQTT broker...'));
 
-    // gv2mqtt re-reads the device list from Govee every 10 minutes, but a
-    // device it learns about that way is announced to nobody: it publishes
-    // discovery configs only at its own startup, on the birth topic, and on
-    // purge-caches (wez/govee2mqtt src/commands/serve.rs, service/hass.rs).
-    // Asking periodically is what lets a device added in the Govee app reach
-    // HomeKit without restarting anything - and the steady stream of
-    // announcements is also what lets pruneUnannounced notice one that's gone.
     if (cfg.refreshStateOnConnect && cfg.periodicRefreshIntervalMs > 0) {
       setInterval(() => pingHomeAssistantBirth(), cfg.periodicRefreshIntervalMs);
     }
@@ -186,7 +187,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     const pruneDelayMs = cfg.autoDiscover ? 20000 : 0;
     setTimeout(() => this.pruneUnbuilt(), pruneDelayMs);
 
-    setInterval(() => this.pruneUnannounced(), PRUNE_CHECK_INTERVAL_MS);
+    this.startDeviceListCheck(pingHomeAssistantBirth);
   }
 
   private createRuntime(resolved: ResolvedDeviceConfig): DeviceRuntime {
@@ -227,8 +228,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
    * already covered by its main config, skipped (real device IDs are plain hex
    * with no hyphen, so a trailing "-<digits>" is unambiguous).
    *
-   * Every announcement is recorded for pruneUnannounced. With autoDiscover, a
-   * device seen for the first time is also exposed and persisted into this
+   * With autoDiscover, a device seen for the first time is also exposed and persisted into this
    * platform's devices[] in config.json, so it shows up in the settings page
    * exactly as if added by hand - from then on it's "explicit".
    */
@@ -277,9 +277,10 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
     parsed: DiscoveryPayload,
     scheduleFollowUpPing: () => void,
   ): void {
-    const now = Date.now();
-    this.lastAnyAnnouncement = now;
-    this.lastAnnounced.set(`${deviceId}:${kind}`, now);
+    this.lastAnnounced.set(`${deviceId}:${kind}`, Date.now());
+    if (this.removedFromAccount.has(deviceId)) {
+      return; // gv2mqtt still remembers it; the Govee account no longer has it
+    }
 
     let runtime = this.runtimes.get(deviceId);
     if (!runtime) {
@@ -460,41 +461,92 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   }
 
   /**
-   * Takes out of HomeKit whatever gv2mqtt has stopped announcing - a device
-   * removed from the Govee account. gv2mqtt keeps every device it has seen
-   * until it restarts, so this happens after its next restart, not the moment
-   * the device is removed.
+   * gv2mqtt re-reads the device list from Govee every 10 minutes, but a device
+   * it learns about that way is announced to nobody: it publishes discovery
+   * configs only at its own startup, on the birth topic, and on purge-caches
+   * (wez/govee2mqtt src/commands/serve.rs, service/hass.rs). And the birth
+   * topic always makes it republish every device, not just the new one.
    *
-   * Only judged while announcements are demonstrably flowing: periodic
-   * refresh must be on, and gv2mqtt must have announced *something* within
-   * the last two refresh intervals. Otherwise silence says nothing about any
-   * one device. The devices[] entry stays, so its settings come back if the
-   * device is ever added again.
+   * So the plugin reads Govee's device list itself and sends the birth message
+   * only when a device has been added to the account. A device missing from
+   * the list MISSING_CHECKS_BEFORE_REMOVAL checks in a row is taken out of
+   * HomeKit; its devices[] entry is kept, so its settings come back if it
+   * returns. Nothing happens without a Govee API key, and a failed or empty
+   * answer changes nothing.
    */
-  private pruneUnannounced(): void {
-    const { refreshStateOnConnect, periodicRefreshIntervalMs } = this.settings;
-    const now = Date.now();
-    if (!refreshStateOnConnect || periodicRefreshIntervalMs <= 0) {
+  private startDeviceListCheck(pingHomeAssistantBirth: () => void): void {
+    const key = this.settings.goveeApiKey;
+    if (!key) {
+      this.log.info('No Govee API key configured; devices added to or removed from the Govee account are not followed.');
       return;
     }
-    if (now - this.lastAnyAnnouncement > 2 * periodicRefreshIntervalMs + 60000) {
+    const check = () => {
+      this.checkDeviceList(key, pingHomeAssistantBirth).catch((err) =>
+        this.log.warn(`Govee device list: ${(err as Error).message}`),
+      );
+    };
+    // The first check only takes a baseline, after the startup discovery burst.
+    setTimeout(check, 30000);
+    setInterval(check, DEVICE_CHECK_INTERVAL_MS);
+  }
+
+  private async checkDeviceList(key: string, pingHomeAssistantBirth: () => void): Promise<void> {
+    const response = await fetch(DEVICE_LIST_URL, {
+      headers: { 'Govee-API-Key': key, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    });
+    const body = (await response.json()) as { code?: unknown; data?: unknown };
+    if (!response.ok || body.code !== 200 || !Array.isArray(body.data) || body.data.length === 0) {
+      this.log.warn(`Govee device list: unexpected answer (HTTP ${response.status}, code ${String(body.code)})`);
       return;
     }
-    for (const runtime of this.runtimes.values()) {
-      for (const kind of [...runtime.exposed]) {
-        const id = runtime.resolved.deviceId;
-        const last = this.lastAnnounced.get(`${id}:${kind}`) ?? this.startedAt;
-        if (now - last < REMOVE_UNANNOUNCED_AFTER_MS) {
-          continue;
-        }
-        this.log.info(
-          `"${runtime.resolved.name}" (${id}): gv2mqtt hasn't announced its ${kind} for ` +
-            `${Math.round((now - last) / 60000)} min while announcing other devices; removing it from HomeKit.`,
-        );
-        const keys = kind === 'light' ? [`${id}-light`, `${id}-effects`, `${id}-alert`] : [`${id}-humidifier`];
-        this.unregister(keys.map((k) => this.uuidFor(k)));
-        runtime.exposed.delete(kind);
+    const ids = new Set(
+      (body.data as { device?: unknown }[])
+        .map((d) => (typeof d.device === 'string' ? d.device.replace(/:/g, '').toUpperCase() : ''))
+        .filter((id) => id),
+    );
+
+    const previous = this.accountDeviceIds;
+    this.accountDeviceIds = ids;
+    let ping = false;
+
+    if (previous) {
+      const added = [...ids].filter((id) => !previous.has(id));
+      if (added.length > 0) {
+        this.log.info(`Govee account has new device(s) ${added.join(', ')}; asking gv2mqtt to announce its devices`);
+        ping = true;
       }
+    }
+
+    for (const id of this.removedFromAccount) {
+      if (ids.has(id)) {
+        this.log.info(`${id} is back in the Govee account`);
+        this.removedFromAccount.delete(id);
+        ping = true;
+      }
+    }
+
+    for (const runtime of this.runtimes.values()) {
+      const id = runtime.resolved.deviceId;
+      if (ids.has(id) || runtime.exposed.size === 0) {
+        this.missingChecks.delete(id);
+        continue;
+      }
+      const missing = (this.missingChecks.get(id) ?? 0) + 1;
+      this.missingChecks.set(id, missing);
+      if (missing < MISSING_CHECKS_BEFORE_REMOVAL) {
+        continue;
+      }
+      this.log.info(`"${runtime.resolved.name}" (${id}) is no longer in the Govee account; removing it from HomeKit.`);
+      const keys = [`${id}-light`, `${id}-effects`, `${id}-alert`, `${id}-humidifier`];
+      this.unregister(keys.map((k) => this.uuidFor(k)));
+      runtime.exposed.clear();
+      this.missingChecks.delete(id);
+      this.removedFromAccount.add(id);
+    }
+
+    if (ping) {
+      pingHomeAssistantBirth();
     }
   }
 

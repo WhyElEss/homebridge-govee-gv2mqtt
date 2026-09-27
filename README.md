@@ -216,20 +216,23 @@ Govee every 10 minutes, through a cache it keeps for up to 15 (`soft_ttl =
 startup, when it sees the Home Assistant "birth" message, and on
 `purge-caches` (its `serve.rs` and `hass.rs`). A device it learns about
 later is announced to nobody — which is why restarting Homebridge could
-miss a device just added in the Govee app. The plugin therefore sends the
-birth message every `periodicRefreshIntervalMs` (default 10 minutes), and a
-new device reaches HomeKit on its own, typically within 10–35 minutes.
+miss a device just added in the Govee app. The birth message itself always
+makes gv2mqtt republish every device, not just a new one.
 
-**A device removed from the Govee account.** gv2mqtt keeps every device it
-has seen until it restarts, so it stops announcing one only after its next
-restart. Once gv2mqtt has gone an hour announcing other devices but not this
-one, the plugin takes its accessories out of HomeKit. That is judged only
-while announcements are demonstrably flowing — periodic refresh on, and
-gv2mqtt having announced something within the last two intervals — so an
-outage of gv2mqtt, the broker or Govee's API removes nothing. The device's
-`devices[]` entry is kept, so its settings come back if it returns; the
-settings page marks it **not in HomeKit**, and its Remove button deletes the
-entry for good.
+So with `goveeApiKey` set (the same key gv2mqtt uses) the plugin reads
+Govee's device list itself every 10 minutes (`GET
+/router/api/v1/user/devices`, developer.govee.com) and sends the birth
+message only when a device has been added to the account; a new device then
+reaches HomeKit within 10–25 minutes, the second part being gv2mqtt's own
+list refresh. A device missing from Govee's list two checks in a row is
+taken out of HomeKit, and kept out even while gv2mqtt — which remembers
+every device until it restarts — still announces it. A failed or empty
+answer from Govee changes nothing. The device's `devices[]` entry is kept,
+so its settings come back if it returns to the account; the settings page
+marks it **not in HomeKit**, and its Remove button deletes the entry for
+good. Without a key nothing is removed automatically, and a new device
+appears only when gv2mqtt announces it anyway: at its own startup, or on the
+birth message the plugin sends when it connects.
 
 Two ways an already-known device stops getting (re-)exposed:
 
@@ -245,8 +248,8 @@ Without `autoDiscover`, `devices[]` is the only source of truth (an
 allowlist — nothing shows up in HomeKit unless it's listed), the safer
 default for a shared/production Home setup. What gv2mqtt announces is then
 used only to tell which kind of accessory a listed device needs (a light or
-a humidifier), and to take out the accessories of a listed device it stops
-announcing, as above.
+a humidifier); a listed device that leaves the Govee account is still taken
+out of HomeKit, as above.
 
 Writing to `devices[]` in config.json from the *running platform* isn't an
 officially supported thing for a Homebridge plugin to do — the supported
@@ -482,10 +485,9 @@ inside the plugin the moment the switch is toggled.
   own next fetch like any stock scene. Neither this topic nor the state
   topic is retained by gv2mqtt, so a fresh subscribe alone reveals nothing —
   both only arrive after gv2mqtt's own startup or after this plugin pings
-  the Home Assistant "birth" topic (next bullet), which it also does every
-  `periodicRefreshIntervalMs` (default 10 minutes) — that is what picks up
-  a newly-created DIY scene or, with `autoDiscover`, a newly-added device
-  without restarting Homebridge.
+  the Home Assistant "birth" topic (next bullet). Set
+  `periodicRefreshIntervalMs` to periodically re-trigger this (e.g. to pick
+  up a newly-created DIY scene) without restarting Homebridge.
 - **Stable effect Identifiers**: HomeKit correlates a Television's "Inputs"
   by a numeric `Identifier`, not by name, and Govee's API doesn't guarantee
   `effect_list` comes back in the same order on every refresh. This plugin
@@ -623,7 +625,9 @@ a report can predate the command it follows.
 
 `test/platform-discovery.test.js` runs the platform itself against a mock
 broker and the real HAP-NodeJS with mocked timers: what gets exposed when
-gv2mqtt announces a device, and — since removing an accessory by mistake
-loses every scene and automation built on it — that removal happens after
-an hour of other devices being announced, and never on silence alone or
-with periodic refresh turned off.
+gv2mqtt announces a device, that nothing is re-announced periodically by
+default, and — against a mocked Govee device list, since removing an
+accessory by mistake loses every scene and automation built on it — that a
+device added to the account is announced once, one missing twice in a row
+leaves HomeKit, one that returns comes back, and a failed or empty answer
+removes nothing.
