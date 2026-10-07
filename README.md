@@ -43,7 +43,12 @@ For every known device the platform creates:
   specific device's real scene effects (Aurora, Fireplace, Rainbow, ...),
   **music (audio-reactive) modes** (reported by Govee's API with a `Music: `
   prefix, e.g. `Music: Rhythm`, `Music: Spectrum`), and any DIY scenes
-  created for it. Selecting an input switches the light into that effect;
+  created for it. Govee's API reports only some music modes that way; on
+  the H6022 the other five from the Govee app's Music tab (Light Waves,
+  Colour Painting, Hopping, Dandelion, Meteor Shower) arrive as plain
+  scenes, so the plugin labels them `Music: ...` in Home too. That is a
+  display name only: the input's number and what is sent to the lamp are
+  unchanged, so automations that already pick one keep working. Selecting an input switches the light into that effect;
   input 1 ("Normal Light") returns it to normal color/color-temperature
   mode. Because this is a regular HomeKit input selection, music modes can
   be triggered manually from the Home app or wired into HomeKit automations

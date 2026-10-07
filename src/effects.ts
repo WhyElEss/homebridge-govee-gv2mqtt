@@ -39,6 +39,32 @@ export const FALLBACK_EFFECT_NAMES: string[] = [
 ].map((name) => FALLBACK_WIRE_OVERRIDES[name] ?? name);
 
 /**
+ * Effects that react to sound but that gv2mqtt does not label "Music: ...",
+ * per Govee model. gv2mqtt only prefixes the entries of the Platform API's
+ * `musicMode` capability; Govee's app lists more music modes than that, and
+ * the rest reach gv2mqtt as ordinary scenes. For the H6022 the app's Music
+ * tab shows eight modes (Energic, Rhythm, Spectrum, Light Waves, Color
+ * Painting, Hopping, Dandelion, Meteor shower); the first three already come
+ * as "Music: ...", these five do not. Names as gv2mqtt reports them, trimmed.
+ */
+const UNLABELLED_MUSIC_EFFECTS: Record<string, ReadonlySet<string>> = {
+  H6022: new Set(['Light Waves', 'Colour Painting', 'Hopping', 'Dandelion', 'Meteor Shower']),
+};
+
+/**
+ * The name Home shows for an effect. Display only: the input's identifier,
+ * its service subtype and the name sent to gv2mqtt all stay the wire name, so
+ * relabelling never renumbers an input an automation has chosen.
+ */
+export function effectDisplayName(model: string | null, name: string): string {
+  const trimmed = name.trim();
+  if (model && UNLABELLED_MUSIC_EFFECTS[model]?.has(trimmed)) {
+    return `Music: ${trimmed}`;
+  }
+  return name;
+}
+
+/**
  * Builds the full Television "Inputs" list for a device: index 0 is always
  * the synthetic "Normal Light" (no effect active - not a real Govee scene),
  * followed by whatever effect names are currently known for that device -

@@ -1,6 +1,7 @@
 import { PlatformAccessory, Service } from 'homebridge';
 import { GoveeGv2MqttPlatform } from './platform';
 import { GoveeDevice } from './govee-device';
+import { effectDisplayName } from './effects';
 import { encodeDisplayOrder } from './tlv';
 
 /**
@@ -50,11 +51,14 @@ interface EffectsContext {
   deviceId?: string;
   effectNames?: string[];
   identifiers?: Record<string, number>;
+  /** Govee SKU, so model-specific input labels are right before discovery arrives. */
+  model?: string;
 }
 
 export class EffectsAccessory {
   private readonly service: Service;
   private appliedEffectNames: string[] | null = null;
+  private appliedModel: string | null = null;
   /** Identifiers that currently have an InputSource; see clampIdentifier. */
   private visibleIdentifiers = new Set<number>([1]);
 
@@ -76,6 +80,9 @@ export class EffectsAccessory {
     const cached = accessory.context as EffectsContext;
     if (cached?.effectNames && cached.identifiers) {
       device.restoreEffectCatalog(cached.effectNames, cached.identifiers);
+    }
+    if (typeof cached?.model === 'string' && cached.model.length > 0) {
+      device.restoreModel(cached.model);
     }
 
     accessory
@@ -112,7 +119,7 @@ export class EffectsAccessory {
     device.on('change', (state) => {
       this.service.updateCharacteristic(Characteristic.Active, state.isOn ? 1 : 0);
       this.service.updateCharacteristic(Characteristic.ActiveIdentifier, this.clampIdentifier(state.effectIndex));
-      if (state.effectNames !== this.appliedEffectNames) {
+      if (state.effectNames !== this.appliedEffectNames || this.device.model !== this.appliedModel) {
         this.syncInputs(state.effectNames);
       }
     });
@@ -147,15 +154,17 @@ export class EffectsAccessory {
       }
     }
 
+    const model = this.device.model;
     names.forEach((name) => {
       const identifier = this.device.identifierForName(name);
       const subtype = subtypeForEffect(name);
+      const label = effectDisplayName(model, name);
       const input =
-        this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, name, subtype);
+        this.accessory.getServiceById(Svc.InputSource, subtype) ?? this.accessory.addService(Svc.InputSource, label, subtype);
 
       input
         .setCharacteristic(Characteristic.Identifier, identifier)
-        .setCharacteristic(Characteristic.ConfiguredName, name)
+        .setCharacteristic(Characteristic.ConfiguredName, label)
         .setCharacteristic(Characteristic.IsConfigured, Characteristic.IsConfigured.CONFIGURED)
         .setCharacteristic(Characteristic.InputSourceType, Characteristic.InputSourceType.APPLICATION)
         .setCharacteristic(Characteristic.CurrentVisibilityState, Characteristic.CurrentVisibilityState.SHOWN);
@@ -172,6 +181,7 @@ export class EffectsAccessory {
     this.service.updateCharacteristic(Characteristic.DisplayOrder, encodeDisplayOrder(order));
 
     this.appliedEffectNames = namesIn;
+    this.appliedModel = model;
     this.persistCatalog();
   }
 
@@ -222,10 +232,16 @@ export class EffectsAccessory {
     if (!this.device.effectsDiscovered) {
       return;
     }
-    const catalog = { deviceId: this.device.config.deviceId, ...this.device.effectCatalog() };
     const cached = this.accessory.context as EffectsContext;
+    const model = this.device.model ?? cached.model;
+    const catalog = {
+      deviceId: this.device.config.deviceId,
+      ...this.device.effectCatalog(),
+      ...(model ? { model } : {}),
+    } as EffectsContext & { effectNames: string[] };
     if (
       cached.deviceId === catalog.deviceId &&
+      cached.model === catalog.model &&
       cached.effectNames?.length === catalog.effectNames.length &&
       cached.effectNames.every((n, i) => n === catalog.effectNames[i])
     ) {

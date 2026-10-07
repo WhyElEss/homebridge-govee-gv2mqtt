@@ -56,6 +56,8 @@ interface DesiredPatch {
 
 interface DiscoveryConfigMessage {
   effect_list?: unknown;
+  /** gv2mqtt fills `model` with the Govee SKU (src/hass_mqtt/base.rs). */
+  device?: { model?: unknown };
 }
 
 /**
@@ -252,6 +254,8 @@ export class GoveeDevice extends EventEmitter {
   private readonly nameByIdentifier = new Map<number, string>();
   private nextIdentifier = 1;
   private effectsAreReal = false;
+  /** Govee SKU from gv2mqtt's discovery config (or the accessory cache); null until known. */
+  private modelName: string | null = null;
 
   constructor(
     private readonly client: MqttClient,
@@ -316,6 +320,16 @@ export class GoveeDevice extends EventEmitter {
    */
   get effectsDiscovered(): boolean {
     return this.effectsAreReal;
+  }
+
+  /** The Govee SKU, e.g. "H6022"; null until gv2mqtt's discovery config or the cache has told us. */
+  get model(): string | null {
+    return this.modelName;
+  }
+
+  /** Reinstates the SKU saved with the effect catalog, so labels are right from the first publish. */
+  restoreModel(model: string): void {
+    this.modelName = model;
   }
 
   /** The catalog to persist: the full effect list plus the numbering Home knows. */
@@ -829,16 +843,20 @@ export class GoveeDevice extends EventEmitter {
       this.log.warn(`[${this.config.name}] ignoring unparseable discovery config payload`);
       return;
     }
-    if (!Array.isArray(cfg.effect_list)) {
-      return;
-    }
-    const names = cfg.effect_list.filter((n): n is string => typeof n === 'string' && n.length > 0);
-    if (names.length === 0) {
-      return;
+    const model = cfg.device?.model;
+    const modelChanged = typeof model === 'string' && model.length > 0 && model !== this.modelName;
+    if (modelChanged) {
+      this.modelName = model;
     }
 
+    const names = Array.isArray(cfg.effect_list)
+      ? cfg.effect_list.filter((n): n is string => typeof n === 'string' && n.length > 0)
+      : [];
     const current = this.state.effectNames.slice(1);
-    if (current.length === names.length && current.every((n, i) => n === names[i])) {
+    if (names.length === 0 || (current.length === names.length && current.every((n, i) => n === names[i]))) {
+      if (modelChanged) {
+        this.emit('change', this.getState());
+      }
       return;
     }
 

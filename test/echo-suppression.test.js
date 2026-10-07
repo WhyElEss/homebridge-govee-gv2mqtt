@@ -628,3 +628,49 @@ test('an unset effect selection differs from an empty one', () => {
   assert.deepStrictEqual(none.visibleEffects, [], 'an explicit empty list is preserved, not treated as unset');
   assert.deepStrictEqual(some.visibleEffects, ['Night']);
 });
+
+/**
+ * Five of the H6022's eight music modes reach gv2mqtt as ordinary scenes.
+ * Home labels them "Music: ..." - display only, nothing else may move.
+ */
+test('H6022 music scenes get a Music: label in Home, and only there', async (t) => {
+  const { effectDisplayName } = require('../dist/effects');
+  assert.strictEqual(effectDisplayName('H6022', 'Light Waves'), 'Music: Light Waves');
+  assert.strictEqual(effectDisplayName('H6022', 'Colour Painting '), 'Music: Colour Painting', 'gv2mqtt sends a trailing space');
+  assert.strictEqual(effectDisplayName('H6022', 'Music: Energic'), 'Music: Energic', 'already labelled stays as is');
+  assert.strictEqual(effectDisplayName('H6022', 'Energic'), 'Energic', 'the plain scene duplicates are left alone');
+  assert.strictEqual(effectDisplayName('H6052', 'Light Waves'), 'Light Waves', 'other models are untouched');
+  assert.strictEqual(effectDisplayName(null, 'Light Waves'), 'Light Waves', 'unknown model is untouched');
+
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+  bridge.emit('message', DISCOVERY_TOPIC, Buffer.from(JSON.stringify({
+    effect_list: ['Night', 'Light Waves'],
+    device: { model: 'H6022' },
+  })));
+  assert.strictEqual(device.model, 'H6022', 'the SKU is read from the discovery config');
+  const id = device.effectCatalog().identifiers['Light Waves'];
+  device.setEffectIndex(id);
+  const sent = bridge.published.find((p) => p.effect);
+  assert.strictEqual(sent.effect, 'Light Waves', 'gv2mqtt still gets the wire name');
+});
+
+test('a model arriving with an unchanged effect list still announces a change', async (t) => {
+  const bridge = new MockBridge();
+  t.after(() => bridge.stop());
+  const device = new GoveeDevice(bridge, deviceConfig(), 10000, silentLog);
+  announceEffects(bridge, ['Night', 'Light Waves']);
+  let changes = 0;
+  device.on('change', () => { changes += 1; });
+  bridge.emit('message', DISCOVERY_TOPIC, Buffer.from(JSON.stringify({
+    effect_list: ['Night', 'Light Waves'],
+    device: { model: 'H6022' },
+  })));
+  assert.strictEqual(changes, 1, 'labels depend on the model, so Home must be told');
+  bridge.emit('message', DISCOVERY_TOPIC, Buffer.from(JSON.stringify({
+    effect_list: ['Night', 'Light Waves'],
+    device: { model: 'H6022' },
+  })));
+  assert.strictEqual(changes, 1, 'the same model again is a no-op');
+});
