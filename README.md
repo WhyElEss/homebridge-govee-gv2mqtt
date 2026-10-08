@@ -231,7 +231,9 @@ message only when a device has been added to the account; a new device then
 reaches HomeKit within 10–25 minutes, the second part being gv2mqtt's own
 list refresh. A device missing from Govee's list two checks in a row is
 taken out of HomeKit, and kept out even while gv2mqtt — which remembers
-every device until it restarts — still announces it. A failed or empty
+every device until it restarts — still announces it. That decision is saved
+in `persist/homebridge-govee-gv2mqtt.removed.json`, so a Homebridge restart
+does not bring the device back either. A failed or empty
 answer from Govee changes nothing. The device's `devices[]` entry is kept,
 so its settings come back if it returns to the account; the settings page
 marks it **not in HomeKit**, and its Remove button deletes the entry for

@@ -60,11 +60,11 @@ const LAMP = '18DFD0C806467677';
 const HUMIDIFIER = '1426D4ADFC840924';
 const MIN = 60 * 1000;
 
-function makePlatform(platformConfig, cachedKeys = []) {
+/** Passing an earlier platform's `dir` is a restart: same config.json and persist directory. */
+function makePlatform(platformConfig, cachedKeys = [], dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gv2-'))) {
   const broker = new MockBroker();
   currentBroker = broker;
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gv2-'));
   const configPath = path.join(dir, 'config.json');
   fs.writeFileSync(configPath, JSON.stringify({ platforms: [{ platform: 'GoveeGv2Mqtt', ...platformConfig }] }));
 
@@ -72,7 +72,9 @@ function makePlatform(platformConfig, cachedKeys = []) {
   const api = new EventEmitter();
   api.hap = hap;
   api.platformAccessory = FakePlatformAccessory;
-  api.user = { configPath: () => configPath };
+  const persistPath = path.join(dir, 'persist');
+  fs.mkdirSync(persistPath, { recursive: true });
+  api.user = { configPath: () => configPath, persistPath: () => persistPath };
   api.registerPlatformAccessories = (_p, _n, list) => list.forEach((a) => registered.set(a.UUID, a));
   api.unregisterPlatformAccessories = (_p, _n, list) => list.forEach((a) => registered.delete(a.UUID));
   api.updatePlatformAccessories = () => {};
@@ -88,7 +90,7 @@ function makePlatform(platformConfig, cachedKeys = []) {
   api.emit('didFinishLaunching');
   const names = () => [...registered.values()].map((a) => a.displayName).sort();
   const savedDevices = () => JSON.parse(fs.readFileSync(configPath, 'utf8')).platforms[0].devices;
-  return { broker, platform, registered, names, savedDevices };
+  return { broker, platform, registered, names, savedDevices, dir };
 }
 
 const lampConfig = { name: 'Table Lamp', deviceId: LAMP };
@@ -251,6 +253,51 @@ test('a removed device that returns to the account is exposed again', async (t) 
   assert.strictEqual(broker.published.filter((p) => p.topic === 'homeassistant/status').length, births + 1);
   announceHumidifier(broker);
   assert.ok(names().includes('Smart Humidifier Lite'));
+});
+
+test('a device that left the account stays out of HomeKit after a restart, and comes back if it returns', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const config = { mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] };
+  const first = makePlatform(config);
+  announceLamp(first.broker);
+  announceHumidifier(first.broker);
+  await runCheck(t, 30000);
+  govee.ids = [LAMP];
+  await runCheck(t, 10 * MIN);
+  await runCheck(t, 10 * MIN);
+  assert.ok(!first.names().includes('Smart Humidifier Lite'));
+
+  // The restart reads config.json as autoDiscover left it: the humidifier is in devices[].
+  const second = makePlatform({ ...config, devices: first.savedDevices() }, [], first.dir);
+  assert.ok(!second.names().includes('Smart Humidifier Lite'), 'not restored at startup');
+  announceHumidifier(second.broker);
+  assert.ok(!second.names().includes('Smart Humidifier Lite'), 'gv2mqtt cannot bring it back');
+
+  govee.ids = [LAMP, HUMIDIFIER];
+  await runCheck(t, 30000);
+  announceHumidifier(second.broker);
+  assert.ok(second.names().includes('Smart Humidifier Lite'), 'exposed once it is back');
+
+  const third = makePlatform({ ...config, devices: first.savedDevices() }, [], first.dir);
+  assert.ok(third.names().includes('Smart Humidifier Lite'), 'and is exposed at the next startup');
+});
+
+test('without a Govee API key a device removed earlier is exposed again', async (t) => {
+  listTimers(t);
+  const govee = mockGovee(t, [LAMP, HUMIDIFIER]);
+  const config = { mqttUrl: 'mqtt://x', autoDiscover: true, goveeApiKey: 'K', devices: [lampConfig] };
+  const first = makePlatform(config);
+  announceLamp(first.broker);
+  announceHumidifier(first.broker);
+  await runCheck(t, 30000);
+  govee.ids = [LAMP];
+  await runCheck(t, 10 * MIN);
+  await runCheck(t, 10 * MIN);
+  const { goveeApiKey: _key, ...noKey } = config;
+  const second = makePlatform({ ...noKey, devices: first.savedDevices() }, [], first.dir);
+  announceHumidifier(second.broker);
+  assert.ok(second.names().includes('Smart Humidifier Lite'));
 });
 
 test('a failed or empty answer from Govee removes nothing', async (t) => {

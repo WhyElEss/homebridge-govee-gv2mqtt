@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import {
   API,
   Characteristic,
@@ -40,6 +41,9 @@ const DEVICE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
  * it is taken out of HomeKit, so one odd answer removes nothing.
  */
 const MISSING_CHECKS_BEFORE_REMOVAL = 2;
+
+/** In Homebridge's persist directory; lists the devices that left the Govee account. */
+const REMOVED_FILE = 'homebridge-govee-gv2mqtt.removed.json';
 
 /**
  * Kept in the context of the accessories this plugin creates, so the settings
@@ -88,7 +92,9 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
   /**
    * Devices taken out of HomeKit because they left the Govee account. gv2mqtt
    * keeps announcing a device until it restarts, so this stops the plugin
-   * from putting it straight back.
+   * from putting it straight back. Kept on disk (REMOVED_FILE): its devices[]
+   * entry stays in config.json, so without it a restart would expose the
+   * device again until the device list had missed it twice more.
    */
   private readonly removedFromAccount = new Set<string>();
   /** Platform-level config with all defaults applied. */
@@ -168,6 +174,8 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       rediscoveryPingTimer = setTimeout(() => pingHomeAssistantBirth(), 3000);
     };
 
+    this.loadRemovedFromAccount();
+
     for (const deviceCfg of cfg.devices) {
       const resolved = resolveDeviceConfig(deviceCfg, cfg.topicPrefix, cfg.haDiscoveryPrefix);
       this.knownDeviceIds.add(deviceCfg.deviceId);
@@ -175,7 +183,13 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
         this.log.info(`"${resolved.name}" (${resolved.deviceId}) is disabled; not exposing it.`);
         continue;
       }
-      this.restoreDevice(this.createRuntime(resolved));
+      const runtime = this.createRuntime(resolved);
+      if (this.removedFromAccount.has(resolved.deviceId)) {
+        // The runtime is still made, so the device comes back if it returns to the account.
+        this.log.info(`"${resolved.name}" (${resolved.deviceId}) is not in the Govee account; not exposing it.`);
+        continue;
+      }
+      this.restoreDevice(runtime);
     }
 
     this.setupDiscovery(scheduleFollowUpPing);
@@ -522,6 +536,7 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       if (ids.has(id)) {
         this.log.info(`${id} is back in the Govee account`);
         this.removedFromAccount.delete(id);
+        this.saveRemovedFromAccount();
         ping = true;
       }
     }
@@ -543,10 +558,48 @@ export class GoveeGv2MqttPlatform implements DynamicPlatformPlugin {
       runtime.exposed.clear();
       this.missingChecks.delete(id);
       this.removedFromAccount.add(id);
+      this.saveRemovedFromAccount();
     }
 
     if (ping) {
       pingHomeAssistantBirth();
+    }
+  }
+
+  private removedFilePath(): string {
+    return path.join(this.api.user.persistPath(), REMOVED_FILE);
+  }
+
+  /**
+   * Without a Govee API key nothing follows the account, so nothing could
+   * ever bring a device back: the file is then ignored.
+   */
+  private loadRemovedFromAccount(): void {
+    if (!this.settings.goveeApiKey) {
+      return;
+    }
+    let ids: unknown;
+    try {
+      ids = JSON.parse(fs.readFileSync(this.removedFilePath(), 'utf8'));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.log.warn(`Could not read ${this.removedFilePath()}: ${(err as Error).message}`);
+      }
+      return;
+    }
+    if (Array.isArray(ids)) {
+      ids.filter((id): id is string => typeof id === 'string').forEach((id) => this.removedFromAccount.add(id));
+    }
+  }
+
+  private saveRemovedFromAccount(): void {
+    const file = this.removedFilePath();
+    try {
+      const tmp = `${file}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify([...this.removedFromAccount].sort()));
+      fs.renameSync(tmp, file);
+    } catch (err) {
+      this.log.warn(`Could not write ${file}: ${(err as Error).message}`);
     }
   }
 
